@@ -44,6 +44,7 @@ typedef struct kvm_ivshmem_device {
 	unsigned int ioaddr_size;
 	unsigned int irq;
 
+	struct list_head permissions;
 	struct pci_dev *dev;
 	char (*msix_names)[256];
 	struct msix_entry *msix_entries;
@@ -67,6 +68,68 @@ static bool doorbell_mode;
 static struct cdev cdev;
 static struct class *ivshmem_class;
 
+/**
+ * Attaches a permission, the ability to read and write a region of memory, to
+ * an open file description (see open(2)). Ownership of the region follows the
+ * file descriptor, even when it is passed among processes.
+ *
+ * region_begin_offset and region_end_offset define the region of memory that
+ * is controlled by the permission. owner_offset points to a word, also in
+ * shared memory, that controls ownership of the region.
+ *
+ * ownership of the region expires when the associated file description is
+ * released.
+ *
+ * At most one permission can be attached to each file description.
+ *
+ * This is useful when implementing HALs like gralloc that scope and pass
+ * ownership of shared resources via file descriptors.
+ *
+ * The caller is responsibe for doing any fencing.
+ *
+ * The calling process will normally identify a currently free region of
+ * memory. It will construct a proposed fd_scoped_permission structure:
+ *
+ *   region_begin_offset and region_end_offset describe the region being claimed
+ *
+ *   owner_offset points to the location in shared memory that indicates the
+ *   owner of the region
+ *
+ *   before_owned_value gives the value that the caller found at owner_offset
+ *   that indicated that the region was free.
+ *
+ *   after_owned_value is the value that will be stored at owner_offset when
+ *   the description is released, destroying the permission.
+ *
+ *   owned_value is the value that will be stored in owner_offset iff the
+ *   permission can be granted. It must be different than before_owned_value.
+ *
+ * Two fd_scoped_permission structures are compatible if they vary only by
+ * their owned_value fields.
+ *
+ * The driver ensures that, for any group of simultaneous callers proposing
+ * compatible fd_scoped_permissions, it will accept exactly one of the
+ * propopsals. The other callers will get a failure with errno of EAGAIN.
+ *
+ * A process receiving a file descriptor can identify the region being
+ * granted using the get_fd_scoped_permission ioctl.
+ *
+ * TODO(ghartman): Add a /sys filesystem entry that summarizes the permissions.
+ */
+typedef struct {
+	u32 region_begin_offset;
+	u32 region_end_offset;
+	u32 owner_offset;
+	u32 before_owned_value;
+	u32 after_owned_value;
+	u32 owned_value;
+} fd_scoped_permission;
+
+typedef struct {
+	fd_scoped_permission permission;
+	struct list_head list;
+} fd_scoped_permission_node;
+
 static long kvm_ivshmem_ioctl(struct file *, unsigned int, unsigned long);
 static int kvm_ivshmem_mmap(struct file *, struct vm_area_struct *);
 static int kvm_ivshmem_open(struct inode *, struct file *);
@@ -74,8 +137,22 @@ static int kvm_ivshmem_release(struct inode *, struct file *);
 static ssize_t kvm_ivshmem_read(struct file *, char *, size_t, loff_t *);
 static ssize_t kvm_ivshmem_write(struct file *, const char *, size_t, loff_t *);
 static loff_t kvm_ivshmem_lseek(struct file * filp, loff_t offset, int origin);
+static int do_create_fd_scoped_permission(fd_scoped_permission *np,
+					  fd_scoped_permission* __user arg);
+static void do_destroy_fd_scoped_permission(fd_scoped_permission* perm);
 
-enum ivshmem_ioctl { set_sema, down_sema, empty, wait_event, wait_event_irq, read_ivposn, read_livelist, sema_irq };
+enum ivshmem_ioctl {
+	set_sema,
+	down_sema,
+	empty,
+	wait_event,
+	wait_event_irq,
+	read_ivposn,
+	read_livelist,
+	sema_irq,
+	create_fd_scoped_permission = _IOW(0xF5, 0, fd_scoped_permission),
+	get_fd_scoped_permission = _IOR(0xF5, 1, fd_scoped_permission)
+};
 
 static const struct file_operations kvm_ivshmem_ops = {
 	.owner	 = THIS_MODULE,
@@ -104,6 +181,53 @@ static struct pci_driver kvm_ivshmem_pci_driver = {
 	.probe	   = kvm_ivshmem_probe_device,
 	.remove	  = kvm_ivshmem_remove_device,
 };
+
+static int do_create_fd_scoped_permission(fd_scoped_permission *np,
+					  fd_scoped_permission* __user arg)
+{
+	atomic_t* owner_ptr = NULL;
+	if (copy_from_user(np, arg, sizeof(*np)))
+		return -EFAULT;
+	// The region must be well formed and have non-zero size
+	if (np->region_begin_offset >= np->region_end_offset)
+		return -EINVAL;
+	// The region must fit in the memory window
+	if (np->region_end_offset > kvm_ivshmem_dev.ioaddr_size)
+		return -EINVAL;
+	// The owner flag must reside in the memory window
+	if (np->owner_offset + sizeof(np->owner_offset)
+	    > kvm_ivshmem_dev.ioaddr_size)
+		return -EINVAL;
+	// Owner offset must be naturally aligned in the window
+	if (np->owner_offset & (sizeof(np->owner_offset) - 1))
+		return -EINVAL;
+	// The owner value must change if we can claim the memory
+	if (np->owned_value == np->before_owned_value)
+		return -EINVAL;
+	owner_ptr = (atomic_t*) kvm_ivshmem_dev.base_addr + np->owner_offset;
+	// We've already verified that this is in the shared memory window, so
+	// it should be safe to write to this address.
+	if (atomic_cmpxchg(owner_ptr,
+			   np->before_owned_value,
+			   np->owned_value) != np->before_owned_value)
+		return -EBUSY;
+	return 0;
+}
+
+static void do_destroy_fd_scoped_permission(fd_scoped_permission* perm)
+{
+	atomic_t* owner_ptr = NULL;
+	int prev = 0;
+	if (!perm)
+		return;
+	owner_ptr = (atomic_t*) kvm_ivshmem_dev.base_addr + perm->owner_offset;
+	prev = atomic_xchg(owner_ptr, perm->after_owned_value);
+	if (prev != perm->owned_value)
+		printk("KVM_IVSHMEM: %x-%x: owner %x: expected to be %x was %x",
+		       perm->region_begin_offset, perm->region_end_offset,
+		       perm->owner_offset, perm->owned_value, prev);
+}
+
 
 static long kvm_ivshmem_ioctl(struct file * filp,
 			      unsigned int cmd, unsigned long arg)
@@ -155,6 +279,41 @@ static long kvm_ivshmem_ioctl(struct file * filp,
 		printk("KVM_IVSHMEM: ringing sema doorbell\n");
 		writel(msg, kvm_ivshmem_dev.regs + Doorbell);
 		break;
+	case create_fd_scoped_permission:
+	{
+		fd_scoped_permission_node* node = NULL;
+		// EBUSY because this fd already has a permission.
+		if (filp->private_data)
+			return -EBUSY;
+		node = kmalloc(sizeof(*node), GFP_KERNEL);
+		// We can't allocate memory for the permission
+		if (!node)
+			return -ENOMEM;
+		INIT_LIST_HEAD(&node->list);
+		rv = do_create_fd_scoped_permission(
+			&node->permission, (fd_scoped_permission __user *)arg);
+		if (!rv) {
+			mutex_lock(&ivshmem_mtx);
+			list_add(&node->list, &kvm_ivshmem_dev.permissions);
+			mutex_unlock(&ivshmem_mtx);
+			filp->private_data = node;
+		} else {
+			kfree(node);
+			return rv;
+		}
+		break;
+	}
+	case get_fd_scoped_permission:
+	{
+		fd_scoped_permission_node* node =
+			(fd_scoped_permission_node*) filp->private_data;
+		if (!node)
+			return -ENOENT;
+		if (copy_to_user((fd_scoped_permission __user *)arg,
+				 &node->permission,
+				 sizeof(node->permission)))
+			return -EFAULT;
+	}
 	default:
 		printk("KVM_IVSHMEM: bad ioctl (\n");
 	}
@@ -424,14 +583,12 @@ static void __exit kvm_ivshmem_cleanup_module (void)
 
 static int __init kvm_ivshmem_init_module (void)
 {
-
 	int err = -ENOMEM;
-
 	dev_t major, devt;
 
+	INIT_LIST_HEAD(&kvm_ivshmem_dev.permissions);
 	major = MKDEV(ivshmem_major, 0);
 	num_ivshmem_devs = 1;
-
 	mutex_init(&ivshmem_mtx);
 
 	err = alloc_chrdev_region(&major, 0, num_ivshmem_devs,
@@ -499,13 +656,22 @@ static int kvm_ivshmem_open(struct inode * inode, struct file * filp)
 		printk(KERN_INFO "minor number is %d\n", KVM_IVSHMEM_DEVICE_MINOR_NUM);
 		return -ENODEV;
 	}
-
+	filp->private_data = NULL;
 	return 0;
 }
 
 static int kvm_ivshmem_release(struct inode * inode, struct file * filp)
 {
-
+	if (filp->private_data) {
+		fd_scoped_permission_node* node =
+			(fd_scoped_permission_node*)filp->private_data;
+		do_destroy_fd_scoped_permission(&node->permission);
+		mutex_lock(&ivshmem_mtx);
+		list_del(&node->list);
+		mutex_unlock(&ivshmem_mtx);
+		kfree(node);
+		filp->private_data = NULL;
+	}
 	return 0;
 }
 
