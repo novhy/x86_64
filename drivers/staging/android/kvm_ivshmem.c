@@ -21,8 +21,6 @@
 #include <linux/mutex.h>
 #include <linux/cdev.h>
 
-#define TRUE 1
-#define FALSE 0
 #define KVM_IVSHMEM_DEVICE_MINOR_NUM 0
 #define IVSHMEM_DEV_NAME "ivshmem"
 
@@ -115,7 +113,6 @@ static long kvm_ivshmem_ioctl(struct file * filp,
 	uint32_t msg;
 
 	printk("KVM_IVSHMEM: args is %ld\n", arg);
-#if 1
 	switch (cmd) {
 	case set_sema:
 		printk("KVM_IVSHMEM: initialize semaphore\n");
@@ -161,8 +158,6 @@ static long kvm_ivshmem_ioctl(struct file * filp,
 	default:
 		printk("KVM_IVSHMEM: bad ioctl (\n");
 	}
-#endif
-
 	return 0;
 }
 
