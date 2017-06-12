@@ -120,6 +120,26 @@ typedef struct {
 	char device_name[16];
 } vsoc_device_region;
 
+/*
+ * The vsoc layout descriptor.
+ * The first 4K should be reserved for the shm header and region descriptors.
+ * The regions should be page aligned.
+ */
+
+typedef struct {
+        uint16_t major_version;
+        uint16_t minor_version;
+
+        /* size of the shm. This may be redundant but nice to have */
+        uint32_t size;
+
+        /* number of shared memory regions */
+        uint32_t region_count;
+
+        /* The offset to the start of region descriptors */
+        uint32_t vsoc_region_desc_offset;
+} vsoc_shm_layout_descriptor;
+
 #define VSOC_CREATE_FD_SCOPED_PERMISSION _IOW(0xF5, 0, fd_scoped_permission)
 #define VSOC_GET_FD_SCOPED_PERMISSION _IOR(0xF5, 1, fd_scoped_permission)
 /* This is used to signal the host to scan the guest_to_host_signal_table
