@@ -80,15 +80,15 @@ static const uint32_t VSOC_NODE_FREE = 0;
 // table indicates that the receiver should signal the futex at the given
 // offset. Offsets are relative to the region, not the shared memory window.
 typedef struct {
-	// log_2(Number of signal table entries)
+        // log_2(Number of signal table entries)
         uint32_t num_nodes_lg2;
-	// Offset to the first signal table entry relative to the start
-	// of the region
+        // Offset to the first signal table entry relative to the start
+        // of the region
         uint32_t offset;
-	// Offset to an atomic uint32_t. Threads use this to get
-	// semi-unique access to an entry in the table
-	uint32_t node_alloc_hint_offset;
-	// The doorbell number is implicitly assigned to the region number
+        // Offset to an atomic uint32_t. Threads use this to get
+        // semi-unique access to an entry in the table
+        uint32_t node_alloc_hint_offset;
+        // The doorbell number is implicitly assigned to the region number
 } vsoc_signal_table_layout;
 
 /**
@@ -109,15 +109,17 @@ typedef struct {
  *      signal_nodes
  */
 typedef struct {
-	uint32_t region_begin_offset;
-	uint32_t region_end_offset;
-	uint16_t min_compatible_version;
-	uint16_t current_version;
-	vsoc_signal_table_layout guest_to_host_signal_table;
-	vsoc_signal_table_layout host_to_guest_signal_table;
-	/* Name of the device. Must always be terminated with a '\0', so
-	 * the longest supported device name is 15 characters. */
-	char device_name[16];
+        uint16_t current_version;
+        uint16_t min_compatible_version;
+        uint32_t region_begin_offset;
+        uint32_t region_end_offset;
+        uint32_t offset_of_region_data;
+        vsoc_signal_table_layout guest_to_host_signal_table;
+        vsoc_signal_table_layout host_to_guest_signal_table;
+        /* Name of the device. Must always be terminated with a '\0', so
+         * the longest supported device name is 15 characters.
+         */
+        char device_name[16];
 } vsoc_device_region;
 
 /*
