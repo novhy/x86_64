@@ -7,7 +7,7 @@
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  * GNU General Public License for more details.
  *
  */
@@ -66,12 +66,12 @@
  * granted using the VSOC_GET_FD_SCOPED_PERMISSION ioctl.
  */
 typedef struct {
-        uint32_t region_begin_offset;
-        uint32_t region_end_offset;
-        uint32_t owner_offset;
-        uint32_t before_owned_value;
-        uint32_t after_owned_value;
-        uint32_t owned_value;
+	uint32_t region_begin_offset;
+	uint32_t region_end_offset;
+	uint32_t owner_offset;
+	uint32_t before_owned_value;
+	uint32_t after_owned_value;
+	uint32_t owned_value;
 } fd_scoped_permission;
 
 static const uint32_t VSOC_NODE_FREE = 0;
@@ -80,15 +80,15 @@ static const uint32_t VSOC_NODE_FREE = 0;
 // table indicates that the receiver should signal the futex at the given
 // offset. Offsets are relative to the region, not the shared memory window.
 typedef struct {
-        // log_2(Number of signal table entries)
-        uint32_t num_nodes_lg2;
-        // Offset to the first signal table entry relative to the start
-        // of the region
-        uint32_t offset;
-        // Offset to an atomic uint32_t. Threads use this to get
-        // semi-unique access to an entry in the table
-        uint32_t node_alloc_hint_offset;
-        // The doorbell number is implicitly assigned to the region number
+	// log_2(Number of signal table entries)
+	uint32_t num_nodes_lg2;
+	// Offset to the first signal table entry relative to the start
+	// of the region
+	uint32_t offset;
+	// Offset to an atomic uint32_t. Threads use this to get
+	// semi-unique access to an entry in the table
+	uint32_t node_alloc_hint_offset;
+	// The doorbell number is implicitly assigned to the region number
 } vsoc_signal_table_layout;
 
 /**
@@ -109,17 +109,17 @@ typedef struct {
  *      signal_nodes
  */
 typedef struct {
-        uint16_t current_version;
-        uint16_t min_compatible_version;
-        uint32_t region_begin_offset;
-        uint32_t region_end_offset;
-        uint32_t offset_of_region_data;
-        vsoc_signal_table_layout guest_to_host_signal_table;
-        vsoc_signal_table_layout host_to_guest_signal_table;
-        /* Name of the device. Must always be terminated with a '\0', so
-         * the longest supported device name is 15 characters.
-         */
-        char device_name[16];
+	uint16_t current_version;
+	uint16_t min_compatible_version;
+	uint32_t region_begin_offset;
+	uint32_t region_end_offset;
+	uint32_t offset_of_region_data;
+	vsoc_signal_table_layout guest_to_host_signal_table;
+	vsoc_signal_table_layout host_to_guest_signal_table;
+	/* Name of the device. Must always be terminated with a '\0', so
+	 * the longest supported device name is 15 characters.
+	 */
+	char device_name[16];
 } vsoc_device_region;
 
 /*
@@ -129,29 +129,51 @@ typedef struct {
  */
 
 typedef struct {
-        uint16_t major_version;
-        uint16_t minor_version;
+	uint16_t major_version;
+	uint16_t minor_version;
 
-        /* size of the shm. This may be redundant but nice to have */
-        uint32_t size;
+	/* size of the shm. This may be redundant but nice to have */
+	uint32_t size;
 
-        /* number of shared memory regions */
-        uint32_t region_count;
+	/* number of shared memory regions */
+	uint32_t region_count;
 
-        /* The offset to the start of region descriptors */
-        uint32_t vsoc_region_desc_offset;
+	/* The offset to the start of region descriptors */
+	uint32_t vsoc_region_desc_offset;
 } vsoc_shm_layout_descriptor;
+
+/*
+ * This specifies the current version that should be stored in
+ * vsoc_shm_layout_descriptor.major_version and
+ * vsoc_shm_layout_descriptor.minor_version.
+ * It should be updated only if the vsoc_device_region and
+ * vsoc_shm_layout_descriptor structures have changed.
+ * Versioning within each region is transfered
+ * via the min_compatible_version and current_version fields in
+ * vsoc_device_region. The driver does not consult these fields: they are left
+ * for the HALs and host processes and will change independently of the layout
+ * version.
+ */
+#define CURRENT_VSOC_LAYOUT_MAJOR_VERSION 1
+#define CURRENT_VSOC_LAYOUT_MINOR_VERSION 0
 
 #define VSOC_CREATE_FD_SCOPED_PERMISSION _IOW(0xF5, 0, fd_scoped_permission)
 #define VSOC_GET_FD_SCOPED_PERMISSION _IOR(0xF5, 1, fd_scoped_permission)
+
 /* This is used to signal the host to scan the guest_to_host_signal_table
  * for new futexes to wake.
  */
 #define VSOC_SEND_INTERRUPT_TO_HOST _IO(0xF5, 2)
+
 /* When this returns the guest will scan host_to_guest_signal_table to
  * check for new futexes to wake.
  */
 /* TODO(ghartman): Consider moving this to the bottom half */
 #define VSOC_WAIT_FOR_INCOMING_INTERRUPT _IO(0xF5, 3)
+
+/* Guest HALs will use this to retrieve the region description after
+ * opening their device node.
+ */
+#define VSOC_DESCRIBE_REGION _IOR(0xF5, 4, vsoc_device_region)
 
 #endif /* _UAPI_LINUX_BINDER_H */
