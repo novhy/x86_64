@@ -47,12 +47,12 @@ config ANDROID_LOW_MEMORY_KILLER_AUTODETECT_OOM_ADJ_VALUES
 	  /sys/module/lowmemorykiller/parameters/adj and convert them
 	  to oom_score_adj values.
 
-config IVSHMEM
-	tristate "Qemu ivshmem support"
+config ANDROID_VSOC
+	tristate "Android VSoC support"
 	default n
 	---help---
-	  This option enables the ivshmem driver that maps shared memory regions
-	  under QEmu.
+	  This option enables the vsoc driver that interacts with memory
+	  published by QEmu's ivshmem device.
 
 config SYNC
 	bool "Synchronization framework"

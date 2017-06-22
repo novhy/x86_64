@@ -1,7 +1,25 @@
 /*
- * drivers/char/kvm_ivshmem.c - driver for KVM Inter-VM shared memory PCI device
+ * drivers/android/staging/vsoc.c
  *
- * Copyright 2009 Cam Macdonell <cam@cs.ualberta.ca>
+ * Android Virtual System on a Chip (VSoC) driver
+ *
+ * Copyright (C) 2017 Google, Inc.
+ *
+ * Author: ghartman@google.com
+ *
+ * This software is licensed under the terms of the GNU General Public
+ * License version 2, as published by the Free Software Foundation, and
+ * may be copied, distributed, and modified under those terms.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ *
+ * Based on drivers/char/kvm_ivshmem.c - driver for KVM Inter-VM shared memory
+ *                                       PCI device:
+ *         Copyright 2009 Cam Macdonell <cam@cs.ualberta.ca>
  *
  * Based on cirrusfb.c and 8139cp.c:
  *	   Copyright 1999-2001 Jeff Garzik
@@ -21,18 +39,21 @@
 #include <linux/mutex.h>
 #include <linux/cdev.h>
 
-#define KVM_IVSHMEM_DEVICE_MINOR_NUM 0
-#define IVSHMEM_DEV_NAME "ivshmem"
+#define VSOC_DEVICE_MINOR_NUM 0
+#define VSOC_DEV_NAME "vsoc"
 
 enum {
-	/* KVM Inter-VM shared memory device register offsets */
+	/*
+	 * These constants are determined KVM Inter-VM shared memory device
+	 * register offsets
+	 */
 	IntrMask	= 0x00,	   /* Interrupt Mask */
 	IntrStatus	= 0x04,	   /* Interrupt Status */
 	IVPosition	= 0x08,	   /* VM ID */
 	Doorbell	= 0x0c,	   /* Doorbell */
 };
 
-typedef struct kvm_ivshmem_device {
+typedef struct vsoc_device {
 	void __iomem * regs;
 
 	void * base_addr;
@@ -52,21 +73,21 @@ typedef struct kvm_ivshmem_device {
 
 	bool		 enabled;
 
-} kvm_ivshmem_device;
+} vsoc_device;
 
-static struct mutex ivshmem_mtx;
+static struct mutex vsoc_mtx;
 static int event_num;
 static struct semaphore sema;
 static wait_queue_head_t wait_queue;
 
-static kvm_ivshmem_device kvm_ivshmem_dev;
+static vsoc_device vsoc_dev;
 
-static int ivshmem_major, ivshmem_minor;
-static int num_ivshmem_devs;
+static int vsoc_major, vsoc_minor;
+static int num_vsoc_devs;
 static bool doorbell_mode;
 
 static struct cdev cdev;
-static struct class *ivshmem_class;
+static struct class *vsoc_class;
 
 /**
  * Attaches a permission, the ability to read and write a region of memory, to
@@ -130,18 +151,18 @@ typedef struct {
 	struct list_head list;
 } fd_scoped_permission_node;
 
-static long kvm_ivshmem_ioctl(struct file *, unsigned int, unsigned long);
-static int kvm_ivshmem_mmap(struct file *, struct vm_area_struct *);
-static int kvm_ivshmem_open(struct inode *, struct file *);
-static int kvm_ivshmem_release(struct inode *, struct file *);
-static ssize_t kvm_ivshmem_read(struct file *, char *, size_t, loff_t *);
-static ssize_t kvm_ivshmem_write(struct file *, const char *, size_t, loff_t *);
-static loff_t kvm_ivshmem_lseek(struct file * filp, loff_t offset, int origin);
+static long vsoc_ioctl(struct file *, unsigned int, unsigned long);
+static int vsoc_mmap(struct file *, struct vm_area_struct *);
+static int vsoc_open(struct inode *, struct file *);
+static int vsoc_release(struct inode *, struct file *);
+static ssize_t vsoc_read(struct file *, char *, size_t, loff_t *);
+static ssize_t vsoc_write(struct file *, const char *, size_t, loff_t *);
+static loff_t vsoc_lseek(struct file * filp, loff_t offset, int origin);
 static int do_create_fd_scoped_permission(fd_scoped_permission *np,
 					  fd_scoped_permission* __user arg);
 static void do_destroy_fd_scoped_permission(fd_scoped_permission* perm);
 
-enum ivshmem_ioctl {
+enum vsoc_ioctl {
 	set_sema,
 	down_sema,
 	empty,
@@ -154,32 +175,32 @@ enum ivshmem_ioctl {
 	get_fd_scoped_permission = _IOR(0xF5, 1, fd_scoped_permission)
 };
 
-static const struct file_operations kvm_ivshmem_ops = {
+static const struct file_operations vsoc_ops = {
 	.owner	 = THIS_MODULE,
-	.open	= kvm_ivshmem_open,
-	.mmap	= kvm_ivshmem_mmap,
-	.read	= kvm_ivshmem_read,
-	.unlocked_ioctl	  = kvm_ivshmem_ioctl,
-	.write	 = kvm_ivshmem_write,
-	.llseek	 = kvm_ivshmem_lseek,
-	.release = kvm_ivshmem_release,
+	.open	= vsoc_open,
+	.mmap	= vsoc_mmap,
+	.read	= vsoc_read,
+	.unlocked_ioctl	  = vsoc_ioctl,
+	.write	 = vsoc_write,
+	.llseek	 = vsoc_lseek,
+	.release = vsoc_release,
 };
 
-static struct pci_device_id kvm_ivshmem_id_table[] = {
+static struct pci_device_id vsoc_id_table[] = {
 	{ 0x1af4, 0x1110, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0 },
 };
-MODULE_DEVICE_TABLE (pci, kvm_ivshmem_id_table);
+MODULE_DEVICE_TABLE (pci, vsoc_id_table);
 
-static void kvm_ivshmem_remove_device(struct pci_dev* pdev);
-static int kvm_ivshmem_probe_device (struct pci_dev *pdev,
+static void vsoc_remove_device(struct pci_dev* pdev);
+static int vsoc_probe_device (struct pci_dev *pdev,
 				     const struct pci_device_id * ent);
 
-static struct pci_driver kvm_ivshmem_pci_driver = {
+static struct pci_driver vsoc_pci_driver = {
 	.name		= "kvm-shmem",
-	.id_table	= kvm_ivshmem_id_table,
-	.probe	   = kvm_ivshmem_probe_device,
-	.remove	  = kvm_ivshmem_remove_device,
+	.id_table	= vsoc_id_table,
+	.probe	   = vsoc_probe_device,
+	.remove	  = vsoc_remove_device,
 };
 
 static int do_create_fd_scoped_permission(fd_scoped_permission *np,
@@ -192,11 +213,11 @@ static int do_create_fd_scoped_permission(fd_scoped_permission *np,
 	if (np->region_begin_offset >= np->region_end_offset)
 		return -EINVAL;
 	// The region must fit in the memory window
-	if (np->region_end_offset > kvm_ivshmem_dev.ioaddr_size)
+	if (np->region_end_offset > vsoc_dev.ioaddr_size)
 		return -EINVAL;
 	// The owner flag must reside in the memory window
 	if (np->owner_offset + sizeof(np->owner_offset)
-	    > kvm_ivshmem_dev.ioaddr_size)
+	    > vsoc_dev.ioaddr_size)
 		return -EINVAL;
 	// Owner offset must be naturally aligned in the window
 	if (np->owner_offset & (sizeof(np->owner_offset) - 1))
@@ -204,7 +225,7 @@ static int do_create_fd_scoped_permission(fd_scoped_permission *np,
 	// The owner value must change if we can claim the memory
 	if (np->owned_value == np->before_owned_value)
 		return -EINVAL;
-	owner_ptr = (atomic_t*) kvm_ivshmem_dev.base_addr + np->owner_offset;
+	owner_ptr = (atomic_t*) vsoc_dev.base_addr + np->owner_offset;
 	// We've already verified that this is in the shared memory window, so
 	// it should be safe to write to this address.
 	if (atomic_cmpxchg(owner_ptr,
@@ -220,54 +241,54 @@ static void do_destroy_fd_scoped_permission(fd_scoped_permission* perm)
 	int prev = 0;
 	if (!perm)
 		return;
-	owner_ptr = (atomic_t*) kvm_ivshmem_dev.base_addr + perm->owner_offset;
+	owner_ptr = (atomic_t*) vsoc_dev.base_addr + perm->owner_offset;
 	prev = atomic_xchg(owner_ptr, perm->after_owned_value);
 	if (prev != perm->owned_value)
-		printk("KVM_IVSHMEM: %x-%x: owner %x: expected to be %x was %x",
+		printk("VSOC: %x-%x: owner %x: expected to be %x was %x",
 		       perm->region_begin_offset, perm->region_end_offset,
 		       perm->owner_offset, perm->owned_value, prev);
 }
 
 
-static long kvm_ivshmem_ioctl(struct file * filp,
+static long vsoc_ioctl(struct file * filp,
 			      unsigned int cmd, unsigned long arg)
 {
 
 	int rv = 0;
 	uint32_t msg;
 
-	printk("KVM_IVSHMEM: args is %ld\n", arg);
+	printk("VSOC: args is %ld\n", arg);
 	switch (cmd) {
 	case set_sema:
-		printk("KVM_IVSHMEM: initialize semaphore\n");
-		printk("KVM_IVSHMEM: args is %ld\n", arg);
+		printk("VSOC: initialize semaphore\n");
+		printk("VSOC: args is %ld\n", arg);
 		sema_init(&sema, arg);
 		break;
 	case down_sema:
-		printk("KVM_IVSHMEM: sleeping on semaphore (cmd = %d)\n", cmd);
+		printk("VSOC: sleeping on semaphore (cmd = %d)\n", cmd);
 		rv = down_interruptible(&sema);
-		printk("KVM_IVSHMEM: waking\n");
+		printk("VSOC: waking\n");
 		break;
 	case empty:
 		msg = ((arg & 0xff) << 16) + (cmd & 0xff);
-		printk("KVM_IVSHMEM: args is %ld\n", arg);
-		printk("KVM_IVSHMEM: ringing sema doorbell\n");
-		writel(msg, kvm_ivshmem_dev.regs + Doorbell);
+		printk("VSOC: args is %ld\n", arg);
+		printk("VSOC: ringing sema doorbell\n");
+		writel(msg, vsoc_dev.regs + Doorbell);
 		break;
 	case wait_event:
-		printk("KVM_IVSHMEM: sleeping on event (cmd = %d)\n", cmd);
+		printk("VSOC: sleeping on event (cmd = %d)\n", cmd);
 		wait_event_interruptible(wait_queue, (event_num == 1));
-		printk("KVM_IVSHMEM: waking\n");
+		printk("VSOC: waking\n");
 		event_num = 0;
 		break;
 	case wait_event_irq:
 		msg = ((arg & 0xff) << 16) + 0;
-		printk("KVM_IVSHMEM: ringing wait_event doorbell on %zu (msg = %d)\n", arg, msg);
-		writel(msg, kvm_ivshmem_dev.regs + Doorbell);
+		printk("VSOC: ringing wait_event doorbell on %zu (msg = %d)\n", arg, msg);
+		writel(msg, vsoc_dev.regs + Doorbell);
 		break;
 	case read_ivposn:
-		msg = readl( kvm_ivshmem_dev.regs + IVPosition);
-		printk("KVM_IVSHMEM: my posn is %d\n", msg);
+		msg = readl( vsoc_dev.regs + IVPosition);
+		printk("VSOC: my posn is %d\n", msg);
 		rv = copy_to_user((void *)arg, &msg, sizeof(msg));
 		if (rv > 0)
 			return -EFAULT;
@@ -275,9 +296,9 @@ static long kvm_ivshmem_ioctl(struct file * filp,
 	case sema_irq:
 		// 2 is the actual code, but we use 7 from the user
 		msg = ((arg & 0xff) << 8) + (cmd & 0xff);
-		printk("KVM_IVSHMEM: args is %ld\n", arg);
-		printk("KVM_IVSHMEM: ringing sema doorbell\n");
-		writel(msg, kvm_ivshmem_dev.regs + Doorbell);
+		printk("VSOC: args is %ld\n", arg);
+		printk("VSOC: ringing sema doorbell\n");
+		writel(msg, vsoc_dev.regs + Doorbell);
 		break;
 	case create_fd_scoped_permission:
 	{
@@ -293,9 +314,9 @@ static long kvm_ivshmem_ioctl(struct file * filp,
 		rv = do_create_fd_scoped_permission(
 			&node->permission, (fd_scoped_permission __user *)arg);
 		if (!rv) {
-			mutex_lock(&ivshmem_mtx);
-			list_add(&node->list, &kvm_ivshmem_dev.permissions);
-			mutex_unlock(&ivshmem_mtx);
+			mutex_lock(&vsoc_mtx);
+			list_add(&node->list, &vsoc_dev.permissions);
+			mutex_unlock(&vsoc_mtx);
 			filp->private_data = node;
 		} else {
 			kfree(node);
@@ -315,12 +336,12 @@ static long kvm_ivshmem_ioctl(struct file * filp,
 			return -EFAULT;
 	}
 	default:
-		printk("KVM_IVSHMEM: bad ioctl (\n");
+		printk("VSOC: bad ioctl (\n");
 	}
 	return 0;
 }
 
-static ssize_t kvm_ivshmem_read(struct file * filp, char * buffer, size_t len,
+static ssize_t vsoc_read(struct file * filp, char * buffer, size_t len,
 				loff_t * poffset)
 {
 	int bytes_read = 0;
@@ -328,18 +349,18 @@ static ssize_t kvm_ivshmem_read(struct file * filp, char * buffer, size_t len,
 
 	offset = *poffset;
 
-	if (!kvm_ivshmem_dev.base_addr) {
-		printk(KERN_ERR "KVM_IVSHMEM: cannot read from ioaddr (NULL)\n");
+	if (!vsoc_dev.base_addr) {
+		printk(KERN_ERR "VSOC: cannot read from ioaddr (NULL)\n");
 		return 0;
 	}
 
-	if (len > kvm_ivshmem_dev.ioaddr_size - offset) {
-		len = kvm_ivshmem_dev.ioaddr_size - offset;
+	if (len > vsoc_dev.ioaddr_size - offset) {
+		len = vsoc_dev.ioaddr_size - offset;
 	}
 
 	if (len == 0) return 0;
 
-	bytes_read = copy_to_user(buffer, kvm_ivshmem_dev.base_addr+offset, len);
+	bytes_read = copy_to_user(buffer, vsoc_dev.base_addr+offset, len);
 	if (bytes_read > 0) {
 		return -EFAULT;
 	}
@@ -348,7 +369,7 @@ static ssize_t kvm_ivshmem_read(struct file * filp, char * buffer, size_t len,
 	return len;
 }
 
-static loff_t kvm_ivshmem_lseek(struct file * filp, loff_t offset, int origin)
+static loff_t vsoc_lseek(struct file * filp, loff_t offset, int origin)
 {
 
 	loff_t retval = -1;
@@ -358,8 +379,8 @@ static loff_t kvm_ivshmem_lseek(struct file * filp, loff_t offset, int origin)
 		offset += filp->f_pos;
 	case 0:
 		retval = offset;
-		if (offset > kvm_ivshmem_dev.ioaddr_size) {
-			offset = kvm_ivshmem_dev.ioaddr_size;
+		if (offset > vsoc_dev.ioaddr_size) {
+			offset = vsoc_dev.ioaddr_size;
 		}
 		filp->f_pos = offset;
 	}
@@ -367,7 +388,7 @@ static loff_t kvm_ivshmem_lseek(struct file * filp, loff_t offset, int origin)
 	return retval;
 }
 
-static ssize_t kvm_ivshmem_write(struct file * filp, const char * buffer,
+static ssize_t vsoc_write(struct file * filp, const char * buffer,
 				 size_t len, loff_t * poffset)
 {
 
@@ -376,31 +397,31 @@ static ssize_t kvm_ivshmem_write(struct file * filp, const char * buffer,
 
 	offset = *poffset;
 
-	if (!kvm_ivshmem_dev.base_addr) {
-		printk(KERN_ERR "KVM_IVSHMEM: cannot write to ioaddr (NULL)\n");
+	if (!vsoc_dev.base_addr) {
+		printk(KERN_ERR "VSOC: cannot write to ioaddr (NULL)\n");
 		return 0;
 	}
 
-	if (len > kvm_ivshmem_dev.ioaddr_size - offset) {
-		len = kvm_ivshmem_dev.ioaddr_size - offset;
+	if (len > vsoc_dev.ioaddr_size - offset) {
+		len = vsoc_dev.ioaddr_size - offset;
 	}
 
 	if (len == 0) return 0;
 
-	bytes_written = copy_from_user(kvm_ivshmem_dev.base_addr+offset,
+	bytes_written = copy_from_user(vsoc_dev.base_addr+offset,
 				       buffer, len);
 	if (bytes_written > 0) {
 		return -EFAULT;
 	}
 
-//	printk(KERN_INFO "KVM_IVSHMEM: wrote %u bytes at offset %lu\n", (unsigned) len, offset);
+//	printk(KERN_INFO "VSOC: wrote %u bytes at offset %lu\n", (unsigned) len, offset);
 	*poffset += len;
 	return len;
 }
 
-static irqreturn_t kvm_ivshmem_interrupt (int irq, void *dev_instance)
+static irqreturn_t vsoc_interrupt (int irq, void *dev_instance)
 {
-	struct kvm_ivshmem_device * dev = dev_instance;
+	struct vsoc_device * dev = dev_instance;
 	u32 status;
 
 	if (unlikely(dev == NULL))
@@ -418,16 +439,16 @@ static irqreturn_t kvm_ivshmem_interrupt (int irq, void *dev_instance)
 		wake_up_interruptible(&wait_queue);
 	}
 
-	printk(KERN_INFO "KVM_IVSHMEM: interrupt (status = 0x%04x)\n",
+	printk(KERN_INFO "VSOC: interrupt (status = 0x%04x)\n",
 	       status);
 
 	return IRQ_HANDLED;
 }
 
-static int request_msix_vectors(struct kvm_ivshmem_device *ivs_info, int nvectors)
+static int request_msix_vectors(struct vsoc_device *ivs_info, int nvectors)
 {
 	int i, err;
-	const char *name = "ivshmem";
+	const char *name = "vsoc";
 
 	printk(KERN_INFO "devname is %s\n", name);
 	ivs_info->nvectors = nvectors;
@@ -459,7 +480,7 @@ static int request_msix_vectors(struct kvm_ivshmem_device *ivs_info, int nvector
 			 "%s-config", name);
 
 		err = request_irq(ivs_info->msix_entries[i].vector,
-				  kvm_ivshmem_interrupt, 0,
+				  vsoc_interrupt, 0,
 				  ivs_info->msix_names[i], ivs_info);
 
 		if (err) {
@@ -471,60 +492,60 @@ static int request_msix_vectors(struct kvm_ivshmem_device *ivs_info, int nvector
 	return 0;
 }
 
-static int kvm_ivshmem_probe_device (struct pci_dev *pdev,
+static int vsoc_probe_device (struct pci_dev *pdev,
 				     const struct pci_device_id * ent) {
 
 	int result;
 
-	printk("KVM_IVSHMEM: Probing for KVM_IVSHMEM Device\n");
+	printk("VSOC: Probing for VSOC Device\n");
 
 	result = pci_enable_device(pdev);
 	if (result) {
-		printk(KERN_ERR "Cannot probe KVM_IVSHMEM device %s: error %d\n",
+		printk(KERN_ERR "Cannot probe VSOC device %s: error %d\n",
 		       pci_name(pdev), result);
 		return result;
 	}
 
-	result = pci_request_regions(pdev, "kvm_ivshmem");
+	result = pci_request_regions(pdev, "vsoc");
 	if (result < 0) {
-		printk(KERN_ERR "KVM_IVSHMEM: cannot request regions\n");
+		printk(KERN_ERR "VSOC: cannot request regions\n");
 		goto pci_disable;
-	} else printk(KERN_ERR "KVM_IVSHMEM: result is %d\n", result);
+	} else printk(KERN_ERR "VSOC: result is %d\n", result);
 
 	if (pdev->irq == 0) {
 		doorbell_mode = true;
 	}
 
-	kvm_ivshmem_dev.ioaddr = pci_resource_start(pdev, 2);
-	kvm_ivshmem_dev.ioaddr_size = pci_resource_len(pdev, 2);
+	vsoc_dev.ioaddr = pci_resource_start(pdev, 2);
+	vsoc_dev.ioaddr_size = pci_resource_len(pdev, 2);
 
-	kvm_ivshmem_dev.base_addr = pci_iomap(pdev, 2, 0);
-	printk(KERN_INFO "KVM_IVSHMEM: iomap base = 0x%lu \n",
-	       (unsigned long) kvm_ivshmem_dev.base_addr);
+	vsoc_dev.base_addr = pci_iomap(pdev, 2, 0);
+	printk(KERN_INFO "VSOC: iomap base = 0x%lu \n",
+	       (unsigned long) vsoc_dev.base_addr);
 
-	if (!kvm_ivshmem_dev.base_addr) {
-		printk(KERN_ERR "KVM_IVSHMEM: cannot iomap region of size %d\n",
-		       kvm_ivshmem_dev.ioaddr_size);
+	if (!vsoc_dev.base_addr) {
+		printk(KERN_ERR "VSOC: cannot iomap region of size %d\n",
+		       vsoc_dev.ioaddr_size);
 		goto pci_release;
 	}
 
-	printk(KERN_INFO "KVM_IVSHMEM: ioaddr = %x ioaddr_size = %d\n",
-	       kvm_ivshmem_dev.ioaddr, kvm_ivshmem_dev.ioaddr_size);
+	printk(KERN_INFO "VSOC: ioaddr = %x ioaddr_size = %d\n",
+	       vsoc_dev.ioaddr, vsoc_dev.ioaddr_size);
 
-	kvm_ivshmem_dev.regaddr =  pci_resource_start(pdev, 0);
-	kvm_ivshmem_dev.reg_size = pci_resource_len(pdev, 0);
-	kvm_ivshmem_dev.regs = pci_iomap(pdev, 0, 0x100);
+	vsoc_dev.regaddr =  pci_resource_start(pdev, 0);
+	vsoc_dev.reg_size = pci_resource_len(pdev, 0);
+	vsoc_dev.regs = pci_iomap(pdev, 0, 0x100);
 
-	kvm_ivshmem_dev.dev = pdev;
+	vsoc_dev.dev = pdev;
 
-	if (!kvm_ivshmem_dev.regs) {
-		printk(KERN_ERR "KVM_IVSHMEM: cannot ioremap registers of size %d\n",
-		       kvm_ivshmem_dev.reg_size);
+	if (!vsoc_dev.regs) {
+		printk(KERN_ERR "VSOC: cannot ioremap registers of size %d\n",
+		       vsoc_dev.reg_size);
 		goto reg_release;
 	}
 
 	/* set all masks to on */
-	writel(0xffffffff, kvm_ivshmem_dev.regs + IntrMask);
+	writel(0xffffffff, vsoc_dev.regs + IntrMask);
 
 	/* by default initialize semaphore to 0 */
 	sema_init(&sema, 0);
@@ -532,14 +553,14 @@ static int kvm_ivshmem_probe_device (struct pci_dev *pdev,
 	init_waitqueue_head(&wait_queue);
 	event_num = 0;
 
-	if (request_msix_vectors(&kvm_ivshmem_dev, 4) != 0) {
+	if (request_msix_vectors(&vsoc_dev, 4) != 0) {
 		if (doorbell_mode == true) goto end;
 		printk(KERN_INFO "regular IRQs\n");
-		if (request_irq(pdev->irq, kvm_ivshmem_interrupt, IRQF_SHARED,
-				"kvm_ivshmem", &kvm_ivshmem_dev)) {
-			printk(KERN_ERR "KVM_IVSHMEM: cannot get interrupt %d\n", pdev->irq);
-			printk(KERN_INFO "KVM_IVSHMEM: irq = %u regaddr = %x reg_size = %d\n",
-			       pdev->irq, kvm_ivshmem_dev.regaddr, kvm_ivshmem_dev.reg_size);
+		if (request_irq(pdev->irq, vsoc_interrupt, IRQF_SHARED,
+				"vsoc", &vsoc_dev)) {
+			printk(KERN_ERR "VSOC: cannot get interrupt %d\n", pdev->irq);
+			printk(KERN_INFO "VSOC: irq = %u regaddr = %x reg_size = %d\n",
+			       pdev->irq, vsoc_dev.regaddr, vsoc_dev.reg_size);
 		}
 	} else {
 		printk(KERN_INFO "MSI-X enabled\n");
@@ -549,7 +570,7 @@ end:
 
 
 reg_release:
-	pci_iounmap(pdev, kvm_ivshmem_dev.base_addr);
+	pci_iounmap(pdev, vsoc_dev.base_addr);
 pci_release:
 	pci_release_regions(pdev);
 pci_disable:
@@ -558,52 +579,52 @@ pci_disable:
 
 }
 
-static void kvm_ivshmem_remove_device(struct pci_dev* pdev)
+static void vsoc_remove_device(struct pci_dev* pdev)
 {
 
-	printk(KERN_INFO "Unregister kvm_ivshmem device.\n");
+	printk(KERN_INFO "Unregister vsoc device.\n");
 	if (!doorbell_mode)
-		free_irq(pdev->irq,&kvm_ivshmem_dev);
-	pci_iounmap(pdev, kvm_ivshmem_dev.regs);
-	pci_iounmap(pdev, kvm_ivshmem_dev.base_addr);
+		free_irq(pdev->irq,&vsoc_dev);
+	pci_iounmap(pdev, vsoc_dev.regs);
+	pci_iounmap(pdev, vsoc_dev.base_addr);
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
 
 }
 
-static void __exit kvm_ivshmem_cleanup_module (void)
+static void __exit vsoc_cleanup_module (void)
 {
-	pci_unregister_driver (&kvm_ivshmem_pci_driver);
-	device_destroy(ivshmem_class, MKDEV(ivshmem_major, ivshmem_minor));
-	class_destroy(ivshmem_class);
+	pci_unregister_driver (&vsoc_pci_driver);
+	device_destroy(vsoc_class, MKDEV(vsoc_major, vsoc_minor));
+	class_destroy(vsoc_class);
 	cdev_del(&cdev);
-	unregister_chrdev_region(MKDEV(ivshmem_major, ivshmem_minor),
-				 num_ivshmem_devs);
+	unregister_chrdev_region(MKDEV(vsoc_major, vsoc_minor),
+				 num_vsoc_devs);
 }
 
-static int __init kvm_ivshmem_init_module (void)
+static int __init vsoc_init_module (void)
 {
 	int err = -ENOMEM;
 	dev_t major, devt;
 
-	INIT_LIST_HEAD(&kvm_ivshmem_dev.permissions);
-	major = MKDEV(ivshmem_major, 0);
-	num_ivshmem_devs = 1;
-	mutex_init(&ivshmem_mtx);
+	INIT_LIST_HEAD(&vsoc_dev.permissions);
+	major = MKDEV(vsoc_major, 0);
+	num_vsoc_devs = 1;
+	mutex_init(&vsoc_mtx);
 
-	err = alloc_chrdev_region(&major, 0, num_ivshmem_devs,
-				  IVSHMEM_DEV_NAME);
+	err = alloc_chrdev_region(&major, 0, num_vsoc_devs,
+				  VSOC_DEV_NAME);
 	if (err) {
 		pr_err("alloc_chrdev_region failed\n");
 		return err;
 	}
 
-	ivshmem_major = MAJOR(major);
+	vsoc_major = MAJOR(major);
 
-	cdev_init(&cdev, &kvm_ivshmem_ops);
+	cdev_init(&cdev, &vsoc_ops);
 	cdev.owner = THIS_MODULE;
 
-	devt = MKDEV(ivshmem_major, ivshmem_minor);
+	devt = MKDEV(vsoc_major, vsoc_minor);
 
 	err = cdev_add(&cdev, devt, 1);
 	if (err) {
@@ -611,25 +632,25 @@ static int __init kvm_ivshmem_init_module (void)
 		goto unregister_device;
 	}
 
-	ivshmem_class = class_create(THIS_MODULE, IVSHMEM_DEV_NAME);
+	vsoc_class = class_create(THIS_MODULE, VSOC_DEV_NAME);
 
-	if (!ivshmem_class) {
+	if (!vsoc_class) {
 		pr_err("class_create error\n");
 		goto del_cdev;
 	}
 
-	major = MKDEV(ivshmem_major, ivshmem_minor);
-	if (!device_create(ivshmem_class,
+	major = MKDEV(vsoc_major, vsoc_minor);
+	if (!device_create(vsoc_class,
 			   NULL,
 			   major,
 			   NULL,
-			   IVSHMEM_DEV_NAME "%d",
-			   ivshmem_minor)) {
+			   VSOC_DEV_NAME "%d",
+			   vsoc_minor)) {
 		pr_err("device_create failed\n");
 		goto destroy_class;
 	}
 
-	err = pci_register_driver(&kvm_ivshmem_pci_driver);
+	err = pci_register_driver(&vsoc_pci_driver);
 	if (err < 0) {
 		goto error;
 	}
@@ -637,60 +658,60 @@ static int __init kvm_ivshmem_init_module (void)
 	return 0;
 
 error:
-	device_destroy(ivshmem_class, MKDEV(ivshmem_major, ivshmem_minor));
+	device_destroy(vsoc_class, MKDEV(vsoc_major, vsoc_minor));
 destroy_class:
-	class_destroy(ivshmem_class);
+	class_destroy(vsoc_class);
 del_cdev:
 	cdev_del(&cdev);
 unregister_device:
-	unregister_chrdev_region(MKDEV(ivshmem_major, ivshmem_minor),
-				 num_ivshmem_devs);
+	unregister_chrdev_region(MKDEV(vsoc_major, vsoc_minor),
+				 num_vsoc_devs);
 	return err;
 }
 
 
-static int kvm_ivshmem_open(struct inode * inode, struct file * filp)
+static int vsoc_open(struct inode * inode, struct file * filp)
 {
-	printk(KERN_INFO "Opening kvm_ivshmem device\n");
-	if (MINOR(inode->i_rdev) != KVM_IVSHMEM_DEVICE_MINOR_NUM) {
-		printk(KERN_INFO "minor number is %d\n", KVM_IVSHMEM_DEVICE_MINOR_NUM);
+	printk(KERN_INFO "Opening vsoc device\n");
+	if (MINOR(inode->i_rdev) != VSOC_DEVICE_MINOR_NUM) {
+		printk(KERN_INFO "minor number is %d\n", VSOC_DEVICE_MINOR_NUM);
 		return -ENODEV;
 	}
 	filp->private_data = NULL;
 	return 0;
 }
 
-static int kvm_ivshmem_release(struct inode * inode, struct file * filp)
+static int vsoc_release(struct inode * inode, struct file * filp)
 {
 	if (filp->private_data) {
 		fd_scoped_permission_node* node =
 			(fd_scoped_permission_node*)filp->private_data;
 		do_destroy_fd_scoped_permission(&node->permission);
-		mutex_lock(&ivshmem_mtx);
+		mutex_lock(&vsoc_mtx);
 		list_del(&node->list);
-		mutex_unlock(&ivshmem_mtx);
+		mutex_unlock(&vsoc_mtx);
 		kfree(node);
 		filp->private_data = NULL;
 	}
 	return 0;
 }
 
-static int kvm_ivshmem_mmap(struct file *filp, struct vm_area_struct * vma)
+static int vsoc_mmap(struct file *filp, struct vm_area_struct * vma)
 {
 
 	unsigned long off;
 	unsigned long start;
 
-	mutex_lock(&ivshmem_mtx);
+	mutex_lock(&vsoc_mtx);
 
 	off = vma->vm_pgoff << PAGE_SHIFT;
-	start = kvm_ivshmem_dev.ioaddr;
+	start = vsoc_dev.ioaddr;
 
-	if ((off + (vma->vm_end - vma->vm_start)) > kvm_ivshmem_dev.ioaddr_size) {
-		mutex_unlock(&ivshmem_mtx);
+	if ((off + (vma->vm_end - vma->vm_start)) > vsoc_dev.ioaddr_size) {
+		mutex_unlock(&vsoc_mtx);
 		printk(KERN_INFO "vma->vm_end: %lu\n", vma->vm_end);
 		printk(KERN_INFO "vma->vm_start: %lu\n", vma->vm_start);
-		printk(KERN_INFO "vma->ioaddr_size: %u\n", kvm_ivshmem_dev.ioaddr_size);
+		printk(KERN_INFO "vma->ioaddr_size: %u\n", vsoc_dev.ioaddr_size);
 		printk(KERN_INFO "length check_failed\n");
 		return -EINVAL;
 	}
@@ -700,19 +721,19 @@ static int kvm_ivshmem_mmap(struct file *filp, struct vm_area_struct * vma)
 
 	if (io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,
 			       vma->vm_end - vma->vm_start, vma->vm_page_prot)) {
-		mutex_unlock(&ivshmem_mtx);
+		mutex_unlock(&vsoc_mtx);
 		printk(KERN_INFO "EAGAIN\n");
 		return -EAGAIN;
 	}
-	mutex_unlock(&ivshmem_mtx);
+	mutex_unlock(&vsoc_mtx);
 	return 0;
 }
 
 
-module_init(kvm_ivshmem_init_module);
-module_exit(kvm_ivshmem_cleanup_module);
+module_init(vsoc_init_module);
+module_exit(vsoc_cleanup_module);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Cam Macdonell <cam@cs.ualberta.ca>");
-MODULE_DESCRIPTION("KVM inter-VM shared memory module");
+MODULE_AUTHOR("Greg Hartman <ghartman@google.com>");
+MODULE_DESCRIPTION("VSoC interpretation of QEmu's ivshmem device");
 MODULE_VERSION("1.0");
