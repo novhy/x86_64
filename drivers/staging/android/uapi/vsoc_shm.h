@@ -74,7 +74,7 @@ typedef struct {
 	uint32_t owned_value;
 } fd_scoped_permission;
 
-static const uint32_t VSOC_NODE_FREE = 0;
+#define VSOC_NODE_FREE ((uint32_t)0)
 
 // Describes a signal table in shared memory. Each non-zero entry in the
 // table indicates that the receiver should signal the futex at the given
