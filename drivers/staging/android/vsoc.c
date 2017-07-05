@@ -51,11 +51,11 @@
  * came out with 2.8
  */
 
+/*
+ * These constants are determined KVM Inter-VM shared memory device
+ * register offsets
+ */
 enum {
-	/*
-	 * These constants are determined KVM Inter-VM shared memory device
-	 * register offsets
-	 */
 	IntrMask	= 0x00,	   /* Interrupt Mask */
 	IntrStatus	= 0x04,	   /* Interrupt Status */
 	IVPosition	= 0x08,	   /* VM ID */
@@ -63,6 +63,7 @@ enum {
 };
 
 static const int REGISTER_BAR = 0;
+static const int MAX_REGISTER_BAR_LEN = 0x100;
 /*
  * The MSI-x BAR is not used directly.
  *
@@ -79,7 +80,7 @@ typedef struct {
 	atomic_t *outgoing_signalled;
 	int irq_requested;
 	int device_created;
-} vsoc_interrupt_t;
+} vsoc_region_data_t;
 
 typedef struct vsoc_device {
 	// Kernel virtual address of REGISTER_BAR.
@@ -102,9 +103,9 @@ typedef struct vsoc_device {
 	struct list_head permissions;
 	struct pci_dev * dev;
 	// Per-region (and therefore per-interrupt) information.
-	vsoc_interrupt_t * interrupts;
+	vsoc_region_data_t * regions_data;
 	// Table of msi-x entries. This has to be separated from
-	// vsoc_interrupt_t because the kernel deals with them as an array.
+	// vsoc_region_data_t because the kernel deals with them as an array.
 	struct msix_entry * msix_entries;
 	/*
 	 * Flags that indicate what we've initialzied. These are used to do an
@@ -166,7 +167,7 @@ MODULE_DEVICE_TABLE (pci, vsoc_id_table);
 
 static void vsoc_remove_device(struct pci_dev* pdev);
 static int vsoc_probe_device (struct pci_dev *pdev,
-				     const struct pci_device_id * ent);
+			      const struct pci_device_id * ent);
 
 static struct pci_driver vsoc_pci_driver = {
 	.name		= "vsoc",
@@ -236,10 +237,10 @@ static long do_vsoc_describe_region(struct file *filp,
 }
 
 static long vsoc_ioctl(struct file * filp,
-			      unsigned int cmd, unsigned long arg)
+		       unsigned int cmd, unsigned long arg)
 {
 	int rv = 0;
-	u32 doorbell_number = iminor(file_inode(filp));
+	u32 region_number = iminor(file_inode(filp));
 
 	switch (cmd) {
 	case VSOC_CREATE_FD_SCOPED_PERMISSION:
@@ -273,13 +274,13 @@ static long vsoc_ioctl(struct file * filp,
 		if (!node)
 			return -ENOENT;
 		if (copy_to_user((fd_scoped_permission __user *)arg,
-				 &node->permission,
-				 sizeof(node->permission)))
+				&node->permission,
+				sizeof(node->permission)))
 			return -EFAULT;
 	}
 	case VSOC_MAYBE_SEND_INTERRUPT_TO_HOST:
-		if (!atomic_xchg(vsoc_dev.interrupts[doorbell_number].outgoing_signalled, 1)) {
-			writel(doorbell_number, vsoc_dev.regs + Doorbell);
+		if (!atomic_xchg(vsoc_dev.regions_data[region_number].outgoing_signalled, 1)) {
+			writel(region_number, vsoc_dev.regs + Doorbell);
 			return 0;
 		} else {
 			return -EBUSY;
@@ -287,8 +288,8 @@ static long vsoc_ioctl(struct file * filp,
 		break;
 	case VSOC_WAIT_FOR_INCOMING_INTERRUPT:
 		wait_event_interruptible(
-			vsoc_dev.interrupts[doorbell_number].wait_queue,
-			(atomic_read(vsoc_dev.interrupts[doorbell_number].incoming_signalled) != 0));
+			vsoc_dev.regions_data[region_number].wait_queue,
+			(atomic_read(vsoc_dev.regions_data[region_number].incoming_signalled) != 0));
 		break;
 	case VSOC_DESCRIBE_REGION:
 		return do_vsoc_describe_region(
@@ -328,7 +329,7 @@ static ssize_t vsoc_read(struct file * filp, char * buffer, size_t len,
 	if (len == 0) return 0;
 
 	bytes_read = copy_to_user(buffer, vsoc_dev.kernel_mapped_shm + offset,
-				  len);
+					len);
 	if (bytes_read > 0) {
 		return -EFAULT;
 	}
@@ -341,32 +342,60 @@ static loff_t vsoc_lseek(struct file * filp, loff_t offset, int origin)
 {
 	u32 region_number = iminor(file_inode(filp));
 	loff_t max_offset;
-	loff_t retval = -1;
 
 	if (region_number >= vsoc_dev.layout->region_count) {
 		printk(KERN_ERR "VSoC: region %d doesn't exist\n",
 		       region_number);
 		return -ENODEV;
 	}
+
 	max_offset = vsoc_dev.regions[region_number].region_end_offset -
 		vsoc_dev.regions[region_number].region_begin_offset;
-	switch (origin) {
-	case 1:
-		offset += filp->f_pos;
-	case 0:
-		retval = offset;
 
-		if (offset > max_offset) {
+	switch (origin) {
+	case SEEK_SET: break;
+	case SEEK_CUR:
+		if (offset > 0 && offset + filp->f_pos < 0) {
+			return -EOVERFLOW;
+		}
+		offset += filp->f_pos;
+		break;
+	case SEEK_END:
+		if (offset > 0 && offset + filp->f_pos < 0) {
+			return -EOVERFLOW;
+		}
+		offset += max_offset;
+		break;
+	case SEEK_DATA:
+		// Doesn't work if region is empty, but that shouldn't happen
+		if (offset >= max_offset) {
+			return -EINVAL;
+		}
+		if (offset < 0) {
+			offset = 0;
+		}
+		break;
+	case SEEK_HOLE:
+		// Next hole is always the end of the region, unless offset is beyond that
+		if (offset < max_offset) {
 			offset = max_offset;
 		}
-		filp->f_pos = offset;
+		break;
+	default:
+		return -EINVAL;
 	}
 
-	return retval;
+	if (offset < 0 || offset > max_offset) {
+		return -EINVAL;
+	}
+
+	filp->f_pos = offset;
+
+	return offset;
 }
 
 static ssize_t vsoc_write(struct file * filp, const char * buffer,
-				 size_t len, loff_t * poffset)
+				size_t len, loff_t * poffset)
 {
 	int bytes_written = 0;
 	unsigned long offset;
@@ -417,12 +446,12 @@ static irqreturn_t vsoc_interrupt(int irq, void *dev_instance)
 		return IRQ_NONE;
 	}
 
-	wake_up_interruptible(&dev->interrupts[irq].wait_queue);
+	wake_up_interruptible(&dev->regions_data[irq].wait_queue);
 	return IRQ_HANDLED;
 }
 
 static int vsoc_probe_device(struct pci_dev *pdev,
-			      const struct pci_device_id * ent)
+			     const struct pci_device_id * ent)
 {
 	int result;
 	int i;
@@ -446,8 +475,8 @@ static int vsoc_probe_device(struct pci_dev *pdev,
 	vsoc_dev.requested_regions = 1;
 	/* Set up the control registers in BAR 0 */
 	reg_size = pci_resource_len(pdev, REGISTER_BAR);
-	if (reg_size > 0x100)
-		vsoc_dev.regs = pci_iomap(pdev, REGISTER_BAR, 0x100);
+	if (reg_size > MAX_REGISTER_BAR_LEN)
+		vsoc_dev.regs = pci_iomap(pdev, REGISTER_BAR, MAX_REGISTER_BAR_LEN);
 	else
 		vsoc_dev.regs = pci_iomap(pdev, REGISTER_BAR, reg_size);
 
@@ -490,7 +519,7 @@ static int vsoc_probe_device(struct pci_dev *pdev,
 		return -EBUSY;
 	}
 	result = alloc_chrdev_region(&devt, 0, vsoc_dev.layout->region_count,
-				  VSOC_DEV_NAME);
+				     VSOC_DEV_NAME);
 	if (result) {
 		printk(KERN_ERR "VSoC: alloc_chrdev_region failed\n");
 		vsoc_remove_device(pdev);
@@ -523,11 +552,11 @@ static int vsoc_probe_device(struct pci_dev *pdev,
 		vsoc_remove_device(pdev);
 		return -ENOSPC;
 	}
-	vsoc_dev.interrupts = kzalloc(
-		vsoc_dev.layout->region_count * sizeof(vsoc_dev.interrupts[0]),
+	vsoc_dev.regions_data = kzalloc(
+		vsoc_dev.layout->region_count * sizeof(vsoc_dev.regions_data[0]),
 		GFP_KERNEL);
-	if (!vsoc_dev.interrupts) {
-		printk(KERN_ERR "VSoC: unable to allocate interrupts\n");
+	if (!vsoc_dev.regions_data) {
+		printk(KERN_ERR "VSoC: unable to allocate regions' data\n");
 		vsoc_remove_device(pdev);
 		return -ENOSPC;
 	}
@@ -544,43 +573,43 @@ static int vsoc_probe_device(struct pci_dev *pdev,
 	vsoc_dev.msix_enabled = 1;
 	for (i = 0; i < vsoc_dev.layout->region_count; ++i) {
 		const vsoc_device_region* region = vsoc_dev.regions + i;
-		vsoc_dev.interrupts[i].name[
-			sizeof(vsoc_dev.interrupts[i].name) - 1] = '\0';
-		memcpy(vsoc_dev.interrupts[i].name,
+		vsoc_dev.regions_data[i].name[
+			sizeof(vsoc_dev.regions_data[i].name) - 1] = '\0';
+		memcpy(vsoc_dev.regions_data[i].name,
 		       region->device_name,
-		       sizeof(vsoc_dev.interrupts[i].name) - 1);
+		       sizeof(vsoc_dev.regions_data[i].name) - 1);
 		printk(KERN_INFO "VSoC: region %d name=%s\n", i,
-		       vsoc_dev.interrupts[i].name);
-		init_waitqueue_head(&vsoc_dev.interrupts[i].wait_queue);
-		vsoc_dev.interrupts[i].incoming_signalled =
+		       vsoc_dev.regions_data[i].name);
+		init_waitqueue_head(&vsoc_dev.regions_data[i].wait_queue);
+		vsoc_dev.regions_data[i].incoming_signalled =
 			vsoc_dev.kernel_mapped_shm +
 			region->region_begin_offset +
 			region->host_to_guest_signal_table.interrupt_signalled_offset;
-		vsoc_dev.interrupts[i].outgoing_signalled =
+		vsoc_dev.regions_data[i].outgoing_signalled =
 			vsoc_dev.kernel_mapped_shm +
 			region->region_begin_offset +
 			region->guest_to_host_signal_table.interrupt_signalled_offset;
 
 		result = request_irq(vsoc_dev.msix_entries[i].vector,
 				     vsoc_interrupt, 0,
-				     vsoc_dev.interrupts[i].name, &vsoc_dev);
+				     vsoc_dev.regions_data[i].name, &vsoc_dev);
 		if (result) {
 			printk(KERN_INFO "VSoC: request_irq failed irq=%d vector=%d\n",
 			       i, vsoc_dev.msix_entries[i].vector);
 			vsoc_remove_device(pdev);
 			return -ENOSPC;
 		}
-		vsoc_dev.interrupts[i].irq_requested = 1;
+		vsoc_dev.regions_data[i].irq_requested = 1;
 		if (!device_create(vsoc_dev.class,
 				   NULL,
 				   MKDEV(vsoc_dev.major, i),
 				   NULL,
-				   vsoc_dev.interrupts[i].name)) {
+				   vsoc_dev.regions_data[i].name)) {
 			printk(KERN_ERR "VSoC: device_create failed\n");
 			vsoc_remove_device(pdev);
 			return -EBUSY;
 		}
-		vsoc_dev.interrupts[i].device_created = 1;
+		vsoc_dev.regions_data[i].device_created = 1;
 	}
 	return 0;
 }
@@ -607,20 +636,20 @@ static void vsoc_remove_device(struct pci_dev* pdev)
 	if (!pdev || !vsoc_dev.dev)
 		return;
 	printk(KERN_INFO "VSoC: remove_device\n");
-	if (vsoc_dev.interrupts) {
+	if (vsoc_dev.regions_data) {
 		for (i = 0; i < vsoc_dev.layout->region_count; ++i) {
-			if (vsoc_dev.interrupts[i].device_created) {
+			if (vsoc_dev.regions_data[i].device_created) {
 				device_destroy(
 					vsoc_dev.class, MKDEV(vsoc_dev.major, i));
-				vsoc_dev.interrupts[i].device_created = 0;
+				vsoc_dev.regions_data[i].device_created = 0;
 			}
-			if (vsoc_dev.interrupts[i].irq_requested) {
+			if (vsoc_dev.regions_data[i].irq_requested) {
 				free_irq(vsoc_dev.msix_entries[i].vector, NULL);
 			}
-			vsoc_dev.interrupts[i].irq_requested = 0;
+			vsoc_dev.regions_data[i].irq_requested = 0;
 		}
-		kfree(vsoc_dev.interrupts);
-		vsoc_dev.interrupts = 0;
+		kfree(vsoc_dev.regions_data);
+		vsoc_dev.regions_data = 0;
 	}
 	if (vsoc_dev.msix_enabled) {
 		pci_disable_msix(pdev);
