@@ -196,14 +196,14 @@ static int do_create_fd_scoped_permission(fd_scoped_permission *np,
 	if (np->owner_offset & (sizeof(np->owner_offset) - 1))
 		return -EINVAL;
 	// The owner value must change if we can claim the memory
-	if (np->owned_value == np->before_owned_value)
+	if (np->owned_value == VSOC_REGION_FREE)
 		return -EINVAL;
 	owner_ptr = (atomic_t*) vsoc_dev.kernel_mapped_shm + np->owner_offset;
 	// We've already verified that this is in the shared memory window, so
 	// it should be safe to write to this address.
 	if (atomic_cmpxchg(owner_ptr,
-			   np->before_owned_value,
-			   np->owned_value) != np->before_owned_value)
+			   VSOC_REGION_FREE,
+			   np->owned_value) != VSOC_REGION_FREE)
 		return -EBUSY;
 	return 0;
 }
@@ -215,7 +215,7 @@ static void do_destroy_fd_scoped_permission(fd_scoped_permission* perm)
 	if (!perm)
 		return;
 	owner_ptr = (atomic_t*) vsoc_dev.kernel_mapped_shm + perm->owner_offset;
-	prev = atomic_xchg(owner_ptr, perm->after_owned_value);
+	prev = atomic_xchg(owner_ptr, VSOC_REGION_FREE);
 	if (prev != perm->owned_value)
 		printk("VSoC: %x-%x: owner %x: expected to be %x was %x",
 		       perm->region_begin_offset, perm->region_end_offset,

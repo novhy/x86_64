@@ -15,13 +15,15 @@
 #ifndef _UAPI_LINUX_VSOC_SHM_H
 #define _UAPI_LINUX_VSOC_SHM_H
 
+#define VSOC_REGION_FREE ((uint32_t)0)
+
 /**
- * A permission is a token that signals that permits a receiver to read
- * and/or write a region of memory.
+ * A permission is a token that permits a receiver to read and/or write a region
+ * of memory.
  *
  * An fd_scoped permission grants both read and write access, and can be
- * can be attached to a file description (see open(2)).
- * Ownership of the region can then be passed by passing a file descriptor
+ * attached to a file description (see open(2)).
+ * Ownership of the region can then be shared by passing a file descriptor
  * among processes.
  *
  * region_begin_offset and region_end_offset define the region of memory that
@@ -46,14 +48,8 @@
  *   owner_offset points to the location in shared memory that indicates the
  *   owner of the region
  *
- *   before_owned_value gives the value that the caller found at owner_offset
- *   that indicated that the region was free.
- *
- *   after_owned_value is the value that will be stored at owner_offset when
- *   the description is released, destroying the permission.
- *
  *   owned_value is the value that will be stored in owner_offset iff the
- *   permission can be granted. It must be different than before_owned_value.
+ *   permission can be granted. It must be different than VSOC_REGION_FREE.
  *
  * Two fd_scoped_permission structures are compatible if they vary only by
  * their owned_value fields.
@@ -69,8 +65,6 @@ typedef struct {
 	uint32_t region_begin_offset;
 	uint32_t region_end_offset;
 	uint32_t owner_offset;
-	uint32_t before_owned_value;
-	uint32_t after_owned_value;
 	uint32_t owned_value;
 } fd_scoped_permission;
 
