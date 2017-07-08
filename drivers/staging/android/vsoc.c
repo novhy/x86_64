@@ -133,7 +133,11 @@ static vsoc_device vsoc_dev;
 typedef struct {
 	fd_scoped_permission permission;
 	struct list_head list;
-} fd_scoped_permission_node;
+} fd_scoped_permission_node_t;
+
+typedef struct {
+	fd_scoped_permission_node_t* fd_scoped_permission_node;
+} vsoc_private_data_t;
 
 static long vsoc_ioctl(struct file *, unsigned int, unsigned long);
 static int vsoc_mmap(struct file *, struct vm_area_struct *);
@@ -208,6 +212,16 @@ static int do_create_fd_scoped_permission(fd_scoped_permission *np,
 	return 0;
 }
 
+static void do_destroy_fd_scoped_permission_node(fd_scoped_permission_node_t* node) {
+	if (node) {
+		do_destroy_fd_scoped_permission(&node->permission);
+		mutex_lock(&vsoc_dev.mtx);
+		list_del(&node->list);
+		mutex_unlock(&vsoc_dev.mtx);
+		kfree(node);
+	}
+}
+
 static void do_destroy_fd_scoped_permission(fd_scoped_permission* perm)
 {
 	atomic_t* owner_ptr = NULL;
@@ -245,9 +259,14 @@ static long vsoc_ioctl(struct file * filp,
 	switch (cmd) {
 	case VSOC_CREATE_FD_SCOPED_PERMISSION:
 	{
-		fd_scoped_permission_node* node = NULL;
+		fd_scoped_permission_node_t* node = NULL;
+		if (!filp->private_data) {
+			printk(KERN_ERR "Vsoc: No private data on fd, region %d\n",
+			       region_number);
+			return -EBADFD;
+		}
 		// EBUSY because this fd already has a permission.
-		if (filp->private_data)
+		if (((vsoc_private_data_t*)filp->private_data)->fd_scoped_permission_node)
 			return -EBUSY;
 		node = kzalloc(sizeof(*node), GFP_KERNEL);
 		// We can't allocate memory for the permission
@@ -260,7 +279,7 @@ static long vsoc_ioctl(struct file * filp,
 			mutex_lock(&vsoc_dev.mtx);
 			list_add(&node->list, &vsoc_dev.permissions);
 			mutex_unlock(&vsoc_dev.mtx);
-			filp->private_data = node;
+			((vsoc_private_data_t*)filp->private_data)->fd_scoped_permission_node = node;
 		} else {
 			kfree(node);
 			return rv;
@@ -269,8 +288,13 @@ static long vsoc_ioctl(struct file * filp,
 	}
 	case VSOC_GET_FD_SCOPED_PERMISSION:
 	{
-		fd_scoped_permission_node* node =
-			(fd_scoped_permission_node*) filp->private_data;
+		fd_scoped_permission_node_t* node = NULL;
+		if (!filp->private_data) {
+			printk(KERN_ERR "Vsoc: No private data on fd, region %d\n",
+			       region_number);
+			return -EBADFD;
+		}
+		node = ((vsoc_private_data_t*)filp->private_data)->fd_scoped_permission_node;
 		if (!node)
 			return -ENOENT;
 		if (copy_to_user((fd_scoped_permission __user *)arg,
@@ -724,22 +748,30 @@ static int vsoc_open(struct inode * inode, struct file * filp)
 		       region_number);
 		return -ENODEV;
 	}
-	filp->private_data = NULL;
+	filp->private_data = kzalloc(sizeof(vsoc_private_data_t), GFP_KERNEL);
+	if (!filp->private_data) {
+		return -ENOMEM;
+	}
 	return 0;
 }
 
 static int vsoc_release(struct inode * inode, struct file * filp)
 {
-	if (filp->private_data) {
-		fd_scoped_permission_node* node =
-			(fd_scoped_permission_node*)filp->private_data;
-		do_destroy_fd_scoped_permission(&node->permission);
-		mutex_lock(&vsoc_dev.mtx);
-		list_del(&node->list);
-		mutex_unlock(&vsoc_dev.mtx);
-		kfree(node);
-		filp->private_data = NULL;
+	vsoc_private_data_t* private_data = NULL;
+	fd_scoped_permission_node_t* node = NULL;
+
+	if (!filp->private_data) {
+		return 0;
 	}
+	private_data = (vsoc_private_data_t*)filp->private_data;
+
+	node = private_data->fd_scoped_permission_node;
+	do_destroy_fd_scoped_permission_node(node);
+	private_data->fd_scoped_permission_node = NULL;
+
+	kfree(private_data);
+	filp->private_data = NULL;
+
 	return 0;
 }
 
