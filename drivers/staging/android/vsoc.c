@@ -774,6 +774,39 @@ static int vsoc_release(struct inode * inode, struct file * filp)
 
 	return 0;
 }
+/**
+ * Returns the (region relative) offset and length of the area specified by the
+ * fd scoped permission. If there is no fd scoped permission set, a default
+ * permission covering the entire region is assumed.
+ */
+static int vsoc_get_permission(struct file *filp,
+			       unsigned long *perm_off,
+			       ssize_t *perm_length) {
+	u32 region_number = iminor(file_inode(filp));
+	u32 off = 0;
+	ssize_t length;
+	if (region_number >= vsoc_dev.layout->region_count) {
+		printk(KERN_ERR "VSoC: region %d doesn't exist\n",
+		       region_number);
+		return -ENODEV;
+	}
+	if (!filp->private_data) {
+		printk(KERN_ERR "VSoC: region %d doesn't have private data\n",
+		       region_number);
+		return -EBADFD;
+	}
+	length = vsoc_dev.regions[region_number].region_end_offset -
+			vsoc_dev.regions[region_number].region_begin_offset;
+	if (((vsoc_private_data_t*)filp->private_data)->fd_scoped_permission_node) {
+		fd_scoped_permission* perm = &((vsoc_private_data_t*)filp->private_data)->
+				fd_scoped_permission_node->permission;
+		off = perm->region_begin_offset - vsoc_dev.regions[region_number].region_begin_offset;
+		length = perm->region_end_offset - perm->region_begin_offset;
+	}
+	*perm_off = off;
+	*perm_length = length;
+	return 0;
+}
 
 static int vsoc_mmap(struct file *filp, struct vm_area_struct * vma)
 {
@@ -781,20 +814,27 @@ static int vsoc_mmap(struct file *filp, struct vm_area_struct * vma)
 	unsigned long len = vma->vm_end - vma->vm_start;
 	ssize_t max_len;
 	unsigned long off;
+	int retval;
 
 	if (region_number >= vsoc_dev.layout->region_count) {
 		printk(KERN_ERR "VSoC: region %d doesn't exist\n",
 		       region_number);
 		return -ENODEV;
 	}
-	off = (vma->vm_pgoff << PAGE_SHIFT)  +
-		vsoc_dev.regions[region_number].region_begin_offset;
-	max_len = vsoc_dev.regions[region_number].region_end_offset - off;
+	retval = vsoc_get_permission(filp, &off, &max_len);
+	if (retval) {
+		return retval;
+	}
+	// Add the requested offset
+	off += (vma->vm_pgoff << PAGE_SHIFT);
+	max_len -= (vma->vm_pgoff << PAGE_SHIFT);
+	// Convert from region relative to absolute
+	off += vsoc_dev.regions[region_number].region_begin_offset;
+	off += vsoc_dev.shm_phys_start;
 	if (max_len < len) {
 		return -EINVAL;
 	}
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-	off += vsoc_dev.shm_phys_start;
 	if (io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,
 			       len, vma->vm_page_prot)) {
 		return -EAGAIN;
