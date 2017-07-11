@@ -45,6 +45,9 @@
  *
  *   region_begin_offset and region_end_offset describe the region being claimed
  *
+ *   owner_region_fd a file descriptor obtained by opening the region that owns
+ *   the current region (ignored if the current region doesn't have an owner)
+ *
  *   owner_offset points to the location in shared memory that indicates the
  *   owner of the region
  *
@@ -67,6 +70,14 @@ typedef struct {
 	uint32_t owner_offset;
 	uint32_t owned_value;
 } fd_scoped_permission;
+
+/**
+ * Structure to use as argument to the ioctl call to create a fd scoped permission
+ */
+typedef struct {
+	fd_scoped_permission perm;
+	int32_t owner_fd;
+} fd_scoped_permission_arg;
 
 #define VSOC_NODE_FREE ((uint32_t)0)
 
@@ -129,6 +140,7 @@ typedef struct {
 } vsoc_signal_table_layout;
 
 typedef char vsoc_device_name[16];
+#define VSOC_REGION_NOT_OWNED ((int32_t)0)
 
 /**
  * Each HAL would talk to a single device region
@@ -159,6 +171,11 @@ typedef struct {
 	 * the longest supported device name is 15 characters.
 	 */
 	vsoc_device_name device_name;
+	/* Some regions are owned by another, so that the owner of the fd
+	 * scoped permissions in these regions lays in the owner region.
+	 * For most regions this value will be VSOC_REGION_NOT_OWNED.
+	 */
+	int32_t owned_by;
 } vsoc_device_region;
 
 /*
@@ -193,7 +210,7 @@ typedef struct {
  * for the HALs and host processes and will change independently of the layout
  * version.
  */
-#define CURRENT_VSOC_LAYOUT_MAJOR_VERSION 1
+#define CURRENT_VSOC_LAYOUT_MAJOR_VERSION 2
 #define CURRENT_VSOC_LAYOUT_MINOR_VERSION 0
 
 #define VSOC_CREATE_FD_SCOPED_PERMISSION _IOW(0xF5, 0, fd_scoped_permission)
