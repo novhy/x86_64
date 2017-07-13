@@ -98,7 +98,7 @@ typedef struct {
 //    interrupt_signalled_offset. There are two outcomes:
 //      a. The prior value was 1. In this case an interrupt has already been
 //         posted. The transmitter is done.
-//      b. The prior value was 0, indicating that the receiver may be asleep.
+//      b. The prior value was 0, indicating that the receiver may be sleeping.
 //         The transmitter will issue an interrupt.
 //
 // 4. On waking the receiver immediately exchanges a 0 with the
@@ -108,18 +108,20 @@ typedef struct {
 //
 // 5. The receiver scans the signal table by atomicaly exchanging 0 at each
 //    location. If a non-zero offset is returned from the exchange the
-//    receiver wakes all sleepers at the given offset.
+//    receiver wakes all sleepers at the given offset:
+//      futex((int*)(region_base + old_value), FUTEX_WAKE, MAX_INT);
 //
-// 6. The receiver thread then does a conditional wait on the condition that
-//    the interrupt_signalled_offset is 0. This catches cases where the
-//    the conditional wait catches cases where the transmitter modifies the
-//    table and posts another interrupt during the scan.
+// 6. The receiver thread then does a conditional wait, waking immediately
+//    if the value at interrupt_signalled_offset is non-zero. This catches cases
+//    here additional  signals were posted while the table was being scanned.
+//    On the guest the wait is handled via the VSOC_WAIT_FOR_INCOMING_INTERRUPT
+//    ioctl.
 typedef struct {
 	// log_2(Number of signal table entries)
 	uint32_t num_nodes_lg2;
 	// Offset to the first signal table entry relative to the start
-	// of the region
-	uint32_t offset_to_signal_table;
+	// of the region.
+	uint32_t futex_uaddr_table_offset;
 	// Offset to an atomic_t / atomic uint32_t. A non-zero value indicates
 	// that one or more offsets are currently posted in the table.
 	// semi-unique access to an entry in the table
