@@ -150,17 +150,18 @@ static loff_t vsoc_lseek(struct file * filp, loff_t offset, int origin);
 static int do_create_fd_scoped_permission(u32 region_number,
 					  fd_scoped_permission *np,
 					  fd_scoped_permission_arg* __user arg);
-static void do_destroy_fd_scoped_permission(fd_scoped_permission* perm);
+static void do_destroy_fd_scoped_permission(vsoc_device_region* owner_region_p,
+					    fd_scoped_permission* perm);
 static long do_vsoc_describe_region(struct file *, vsoc_device_region __user *);
 static int vsoc_get_area(struct file *filp,
-			 u32* perm_off,
+			 vsoc_shm_off_t* perm_off,
 			 ssize_t *perm_length);
 
-static inline void* shm_off_to_virtual_addr(u32 offset)
+static inline void* shm_off_to_virtual_addr(vsoc_shm_off_t offset)
 {
 	return vsoc_dev.kernel_mapped_shm + offset;
 }
-static inline phys_addr_t shm_off_to_phys_addr(u32 offset)
+static inline phys_addr_t shm_off_to_phys_addr(vsoc_shm_off_t offset)
 {
 	return vsoc_dev.shm_phys_start + offset;
 }
@@ -217,33 +218,29 @@ static int do_create_fd_scoped_permission(u32 region_number,
 {
 	atomic_t* owner_ptr = NULL;
 	int32_t owner_fd;
-	int32_t region_owner;
+	int32_t owner_region_num;
 	struct file* owner_filp;
 	u32 provided_owner;
+	vsoc_device_region* owner_region_p;
 	if (copy_from_user(np, &arg->perm, sizeof(*np)) ||
 	    copy_from_user(&owner_fd, &arg->owner_fd, sizeof(owner_fd)))
 		return -EFAULT;
-	// The region must be well formed and have non-zero size
-	if (np->region_begin_offset >= np->region_end_offset)
+	// The area must be well formed and have non-zero size
+	if (np->begin_offset >= np->end_offset)
 		return -EINVAL;
-	// The region must fit in the memory window
-	if (np->region_end_offset > vsoc_dev.shm_size)
+	// The area must fit in the memory window
+	if (np->end_offset >
+	    vsoc_dev.regions[region_number].region_end_offset -
+	    vsoc_dev.regions[region_number].region_begin_offset)
 		return -EINVAL;
-	// The owner flag must reside in the memory window
-	if (np->owner_offset + sizeof(np->owner_offset)
-	    > vsoc_dev.shm_size)
-		return -EINVAL;
-	// Owner offset must be naturally aligned in the window
-	if (np->owner_offset & (sizeof(np->owner_offset) - 1))
-		return -EINVAL;
-	// The owner value must change if we can claim the memory
-	if (np->owned_value == VSOC_REGION_FREE)
+	// The area must be in the region data section
+	if (np->begin_offset < vsoc_dev.regions[region_number].offset_of_region_data)
 		return -EINVAL;
 	// Ensure region is owned by another region
 	if (vsoc_dev.regions[region_number].owned_by == VSOC_REGION_NOT_OWNED) {
 		return -EPERM;
 	}
-	region_owner = vsoc_dev.regions[region_number].owned_by;
+	owner_region_num = vsoc_dev.regions[region_number].owned_by;
 	owner_filp = fdget(owner_fd).file;
 	// Check that it's valid fd,
 	if (!owner_filp ||
@@ -256,7 +253,20 @@ static int do_create_fd_scoped_permission(u32 region_number,
 	    provided_owner != region_owner) {
 		return -EPERM;
 	}
-	owner_ptr = (atomic_t*) vsoc_dev.kernel_mapped_shm + np->owner_offset;
+	owner_region_p = &vsoc_dev.regions[owner_region_num];
+	// The owner flag must reside in the owner memory
+	if (np->owner_offset + sizeof(np->owner_offset)
+	    > owner_region_p->region_end_offset -
+	    owner_region_p->region_begin_offset)
+		return -EINVAL;
+	// Owner offset must be naturally aligned in the window
+	if (np->owner_offset & (sizeof(np->owner_offset) - 1))
+		return -EINVAL;
+	// The owner value must change to claim the memory
+	if (np->owned_value == VSOC_REGION_FREE)
+		return -EINVAL;
+	owner_ptr = (atomic_t*) vsoc_dev.kernel_mapped_shm +
+			owner_region_p->region_begin_offset + np->owner_offset;
 	// We've already verified that this is in the shared memory window, so
 	// it should be safe to write to this address.
 	if (atomic_cmpxchg(owner_ptr,
@@ -266,10 +276,12 @@ static int do_create_fd_scoped_permission(u32 region_number,
 	return 0;
 }
 
-static void do_destroy_fd_scoped_permission_node(fd_scoped_permission_node_t* node)
+static void do_destroy_fd_scoped_permission_node(vsoc_device_region* owner_region_p,
+						 fd_scoped_permission_node_t* node)
 {
 	if (node) {
-		do_destroy_fd_scoped_permission(&node->permission);
+		do_destroy_fd_scoped_permission(owner_region_p,
+						&node->permission);
 		mutex_lock(&vsoc_dev.mtx);
 		list_del(&node->list);
 		mutex_unlock(&vsoc_dev.mtx);
@@ -277,22 +289,26 @@ static void do_destroy_fd_scoped_permission_node(fd_scoped_permission_node_t* no
 	}
 }
 
-static void do_destroy_fd_scoped_permission(fd_scoped_permission* perm)
+static void do_destroy_fd_scoped_permission(vsoc_device_region* owner_region_p,
+					    fd_scoped_permission* perm)
 {
 	atomic_t* owner_ptr = NULL;
 	int prev = 0;
 	if (!perm)
 		return;
-	owner_ptr = (atomic_t*) vsoc_dev.kernel_mapped_shm + perm->owner_offset;
+	owner_ptr = (atomic_t*)shm_off_to_virtual_addr(
+	    owner_region_p->region_begin_offset + perm->owner_offset);
 	prev = atomic_xchg(owner_ptr, VSOC_REGION_FREE);
 	if (prev != perm->owned_value)
-		printk("VSoC: %x-%x: owner %x: expected to be %x was %x",
-		       perm->region_begin_offset, perm->region_end_offset,
-		       perm->owner_offset, perm->owned_value, prev);
+		printk("VSoC: %x-%x: owner (%s) %x: expected to be %x was %x",
+		       perm->begin_offset, perm->end_offset,
+		       owner_region_p->device_name, perm->owner_offset,
+		       perm->owned_value, prev);
 }
 
 static long do_vsoc_describe_region(struct file *filp,
-				    vsoc_device_region __user *dest) {
+				    vsoc_device_region __user *dest)
+{
 	u32 region_number;
 	if (region_number_from_file(filp, &region_number)) {
 		return -ENODEV;
@@ -341,20 +357,17 @@ static long vsoc_ioctl(struct file * filp,
 			// process did any read/write operations on the fd
 			// before creating the permission.
 			if (filp->f_pos) {
-				if (filp->f_pos > node->permission.region_end_offset -
-				    vsoc_dev.regions[region_number].region_begin_offset) {
+				if (filp->f_pos > node->permission.end_offset) {
 					// If the offset is beyond the permission end, set it
 					// to the end.
-					filp->f_pos = node->permission.region_end_offset -
-							node->permission.region_begin_offset;
+					filp->f_pos = node->permission.end_offset;
 				} else {
 					// If the offset is within the permission interval
 					// keep it there otherwise reset it to zero.
-					if (filp->f_pos < node->permission.begin_offset -
-					    vsoc_dev.regions[region_number].region_begin_offset) {
+					if (filp->f_pos < node->permission.begin_offset) {
 						filp->f_pos = 0;
 					} else {
-						filp->f_pos -= node->permission.region_begin_offset;
+						filp->f_pos -= node->permission.begin_offset;
 					}
 				}
 			}
@@ -408,7 +421,7 @@ static long vsoc_ioctl(struct file * filp,
 static ssize_t vsoc_read(struct file * filp, char * buffer, size_t len,
 				loff_t * poffset)
 {
-	u32 area_off;
+	vsoc_shm_off_t area_off;
 	void* area_p;
 	ssize_t area_len;
 	int retval = vsoc_get_area(filp, &area_off, &area_len);
@@ -489,7 +502,7 @@ static loff_t vsoc_lseek(struct file * filp, loff_t offset, int origin)
 static ssize_t vsoc_write(struct file * filp, const char * buffer,
 				size_t len, loff_t * poffset)
 {
-	u32 area_off;
+	vsoc_shm_off_t area_off;
 	void* area_p;
 	ssize_t area_len;
 	int retval = vsoc_get_area(filp, &area_off, &area_len);
@@ -816,14 +829,28 @@ static int vsoc_release(struct inode * inode, struct file * filp)
 {
 	vsoc_private_data_t* private_data = NULL;
 	fd_scoped_permission_node_t* node = NULL;
+	vsoc_device_region* owner_region_p = NULL;
+	u32 region_number;
+	int retval = region_number_from_inode(inode, &region_number);
+	if (retval) {
+		return retval;
+	}
 
 	if (!filp->private_data) {
+		printk(KERN_ERR "VSoC: region %d doesn't have private data\n",
+		       region_number);
 		return 0;
 	}
 	private_data = (vsoc_private_data_t*)filp->private_data;
 
 	node = private_data->fd_scoped_permission_node;
-	do_destroy_fd_scoped_permission_node(node);
+	if (vsoc_dev.regions[region_number].owned_by != VSOC_REGION_NOT_OWNED) {
+		owner_region_p = &vsoc_dev.regions[
+		    vsoc_dev.regions[region_number].owned_by];
+	} else {
+		owner_region_p = &vsoc_dev.regions[region_number];
+	}
+	do_destroy_fd_scoped_permission_node(owner_region_p, node);
 	private_data->fd_scoped_permission_node = NULL;
 
 	kfree(private_data);
@@ -839,10 +866,10 @@ static int vsoc_release(struct inode * inode, struct file * filp)
  * by another one, in which case the default is a permission with zero size.
  */
 static int vsoc_get_area(struct file *filp,
-			 u32 *area_p,
+			 vsoc_shm_off_t *area_offset,
 			 ssize_t *area_len) {
 	u32 region_number;
-	u32 off = 0;
+	vsoc_shm_off_t off = 0;
 	ssize_t length = 0;
 	int retval;
 
@@ -855,19 +882,22 @@ static int vsoc_get_area(struct file *filp,
 		       region_number);
 		return -EBADFD;
 	}
-	off += vsoc_dev.regions[region_number].region_begin_offset;
+	off = vsoc_dev.regions[region_number].region_begin_offset;
 	if (((vsoc_private_data_t*)filp->private_data)->fd_scoped_permission_node) {
 		fd_scoped_permission* perm = &((vsoc_private_data_t*)filp->private_data)->
 				fd_scoped_permission_node->permission;
-		off += perm->region_begin_offset - vsoc_dev.regions[region_number].region_begin_offset;
-		length = perm->region_end_offset - perm->region_begin_offset;
+		off += perm->begin_offset;
+		length = perm->end_offset - perm->begin_offset;
 	} else if (vsoc_dev.regions[region_number].owned_by == VSOC_REGION_NOT_OWNED) {
 		// No permission set and the regions is not owned by another,
 		// default to full region access.
 		length = vsoc_dev.regions[region_number].region_end_offset -
 			vsoc_dev.regions[region_number].region_begin_offset;
-	} // else length stays at zero, access is denied.
-	if (area_p) *area_p = off;
+	} else {
+		// return zero length, access is denied.
+		length = 0;
+	}
+	if (area_offset) *area_offset = off;
 	if (area_len) *area_len = length;
 	return 0;
 }
@@ -876,13 +906,14 @@ static int vsoc_mmap(struct file *filp, struct vm_area_struct * vma)
 {
 	u32 region_number;
 	unsigned long len = vma->vm_end - vma->vm_start;
-	u32 area_off;
+	vsoc_shm_off_t area_off;
 	phys_addr_t mem_off;
 	ssize_t area_len;
 	int retval;
 
-	if (region_number_from_file(filp, &region_number)) {
-		return -ENODEV;
+	retval = region_number_from_file(filp, &region_number);
+	if (retval) {
+		return retval;
 	}
 	retval = vsoc_get_area(filp, &area_off, &area_len);
 	if (retval) {

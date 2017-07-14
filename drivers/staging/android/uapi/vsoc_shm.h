@@ -14,21 +14,30 @@
 
 #ifndef _UAPI_LINUX_VSOC_SHM_H
 #define _UAPI_LINUX_VSOC_SHM_H
-
-#define VSOC_REGION_FREE ((uint32_t)0)
+/*
+ * The following types represent memory offsets relative to the beginning of
+ * shared memory and the beginning of regions in shared memory respectively.
+ * We considered using struct to wrap the underlying integer types and gain
+ * static type checking, but decided to not do it due to the lack of support for
+ * operator overloading in C and because we couldn't find any working examples
+ * in the kernel code (structs are only used when the type being represented is
+ * not expected to support arithmetic operations)
+ */
+typedef uint32_t vsoc_shm_off_t;
+typedef uint32_t vsoc_reg_off_t;
 
 /**
- * A permission is a token that permits a receiver to read and/or write a region
- * of memory.
+ * A permission is a token that permits a receiver to read and/or write an area
+ * of memory within a Vsoc region.
  *
  * An fd_scoped permission grants both read and write access, and can be
  * attached to a file description (see open(2)).
- * Ownership of the region can then be shared by passing a file descriptor
+ * Ownership of the area can then be shared by passing a file descriptor
  * among processes.
  *
- * region_begin_offset and region_end_offset define the region of memory that
- * is controlled by the permission. owner_offset points to a word, also in
- * shared memory, that controls ownership of the region.
+ * begin_offset and end_offset define the area of memory that is controlled by
+ * the permission. owner_offset points to a word, also in shared memory, that
+ * controls ownership of the area.
  *
  * ownership of the region expires when the associated file description is
  * released.
@@ -40,16 +49,16 @@
  *
  * The caller is responsibe for doing any fencing.
  *
- * The calling process will normally identify a currently free region of
- * memory. It will construct a proposed fd_scoped_permission structure:
+ * The calling process will normally identify a currently free area of
+ * memory. It will construct a proposed fd_scoped_permission_arg structure:
  *
- *   region_begin_offset and region_end_offset describe the region being claimed
+ *   begin_offset and end_offset describe the area being claimed
  *
- *   owner_region_fd a file descriptor obtained by opening the region that owns
+ *   region_owner_fd a file descriptor obtained by opening the region that owns
  *   the current region (ignored if the current region doesn't have an owner)
  *
  *   owner_offset points to the location in shared memory that indicates the
- *   owner of the region
+ *   owner of the area.
  *
  *   owned_value is the value that will be stored in owner_offset iff the
  *   permission can be granted. It must be different than VSOC_REGION_FREE.
@@ -65,11 +74,17 @@
  * granted using the VSOC_GET_FD_SCOPED_PERMISSION ioctl.
  */
 typedef struct {
-	uint32_t region_begin_offset;
-	uint32_t region_end_offset;
-	uint32_t owner_offset;
+	vsoc_reg_off_t begin_offset;
+	vsoc_reg_off_t end_offset;
+	vsoc_reg_off_t owner_offset;
 	uint32_t owned_value;
 } fd_scoped_permission;
+/*
+ * This value represents a free area of memory. The driver expects to see this
+ * value at owner_offset when creating a permission otherwise it will not do it,
+ * and will write this value back once the permission is no longer needed.
+ */
+#define VSOC_REGION_FREE ((uint32_t)0)
 
 /**
  * Structure to use as argument to the ioctl call to create a fd scoped permission
@@ -131,19 +146,19 @@ typedef struct {
 	// log_2(Number of signal table entries)
 	uint32_t num_nodes_lg2;
 	// Offset to the first signal table entry relative to the start
-	// of the region.
-	uint32_t futex_uaddr_table_offset;
+	// of the region
+	vsoc_reg_off_t futex_uaddr_table_offset;
 	// Offset to an atomic_t / atomic uint32_t. A non-zero value indicates
 	// that one or more offsets are currently posted in the table.
 	// semi-unique access to an entry in the table
-	uint32_t interrupt_signalled_offset;
+	vsoc_reg_off_t interrupt_signalled_offset;
 } vsoc_signal_table_layout;
 
 typedef char vsoc_device_name[16];
 #define VSOC_REGION_NOT_OWNED ((int32_t)0)
 
 /**
- * Each HAL would talk to a single device region
+ * Each HAL would (usually) talk to a single device region
  * Mulitple entities care about these regions:
  * * The ivshmem_server will populate the regions in shared memory
  * * The guest kernel will read the region, create minor device nodes, and
@@ -162,9 +177,9 @@ typedef char vsoc_device_name[16];
 typedef struct {
 	uint16_t current_version;
 	uint16_t min_compatible_version;
-	uint32_t region_begin_offset;
-	uint32_t region_end_offset;
-	uint32_t offset_of_region_data;
+	vsoc_reg_off_t region_begin_offset;
+	vsoc_reg_off_t region_end_offset;
+	vsoc_reg_off_t offset_of_region_data;
 	vsoc_signal_table_layout guest_to_host_signal_table;
 	vsoc_signal_table_layout host_to_guest_signal_table;
 	/* Name of the device. Must always be terminated with a '\0', so
