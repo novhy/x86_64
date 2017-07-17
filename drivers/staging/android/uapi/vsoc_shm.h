@@ -190,7 +190,7 @@ typedef struct {
 	 * scoped permissions in these regions lays in the owner region.
 	 * For most regions this value will be VSOC_REGION_NOT_OWNED.
 	 */
-	int32_t owned_by;
+	uint32_t owned_by;
 } vsoc_device_region;
 
 /*
