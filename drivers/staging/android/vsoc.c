@@ -318,6 +318,9 @@ static long vsoc_ioctl(struct file * filp,
 	case VSOC_DESCRIBE_REGION:
 		return do_vsoc_describe_region(
 			filp, (vsoc_device_region __user *)arg);
+	case VSOC_SELF_INTERRUPT:
+		atomic_set(vsoc_dev.regions_data[region_number].incoming_signalled, 1);
+		wake_up_interruptible(&vsoc_dev.regions_data[region_number].wait_queue);
 	default:
 		printk("VSoC: bad ioctl (\n");
 	}

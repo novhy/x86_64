@@ -216,4 +216,9 @@ typedef struct {
  */
 #define VSOC_DESCRIBE_REGION _IOR(0xF5, 4, vsoc_device_region)
 
+/* Wake any threads that may be waiting for a host interrupt on this region.
+ * This is mostly used during shutdown.
+ */
+#define VSOC_SELF_INTERRUPT _IO(0xF5, 5)
+
 #endif /* _UAPI_LINUX_BINDER_H */
