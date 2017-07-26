@@ -54,9 +54,6 @@ typedef uint32_t vsoc_reg_off_t;
  *
  *   begin_offset and end_offset describe the area being claimed
  *
- *   region_owner_fd a file descriptor obtained by opening the region that owns
- *   the current region (ignored if the current region doesn't have an owner)
- *
  *   owner_offset points to the location in shared memory that indicates the
  *   owner of the area.
  *
@@ -87,11 +84,11 @@ typedef struct {
 #define VSOC_REGION_FREE ((uint32_t)0)
 
 /**
- * Structure to use as argument to the ioctl call to create a fd scoped permission
+ * Structure to use as argument to the ioctl call to create a fd scoped permission.
  */
 typedef struct {
 	fd_scoped_permission perm;
-	int32_t owner_fd;
+	int32_t managed_region_fd;
 } fd_scoped_permission_arg;
 
 #define VSOC_NODE_FREE ((uint32_t)0)
@@ -155,7 +152,7 @@ typedef struct {
 } vsoc_signal_table_layout;
 
 typedef char vsoc_device_name[16];
-#define VSOC_REGION_NOT_OWNED ((int32_t)0)
+#define VSOC_REGION_WHOLE ((int32_t)0)
 
 /**
  * Each HAL would (usually) talk to a single device region
@@ -186,11 +183,16 @@ typedef struct {
 	 * the longest supported device name is 15 characters.
 	 */
 	vsoc_device_name device_name;
-	/* Some regions are owned by another, so that the owner of the fd
-	 * scoped permissions in these regions lays in the owner region.
-	 * For most regions this value will be VSOC_REGION_NOT_OWNED.
+	/* There are two ways that permissions to access regions are handled:
+	 *   - When subdivided_by is VSOC_REGION_WHOLE, any process that can
+	 *     open the device node for the region gains complete access to it.
+	 *   - When subdivided is set processes that open the region cannot
+	 *     access it. Access to a sub-region must be established by invoking
+	 *     the VSOC_CREATE_FD_SCOPE_PERMISSION ioctl on the region
+	 *     referenced in subdivided_by, providing a fileinstance
+	 *     (represented by a fd) opened on this region.
 	 */
-	uint32_t owned_by;
+	uint32_t managed_by;
 } vsoc_device_region;
 
 /*
