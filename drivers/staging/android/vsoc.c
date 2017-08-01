@@ -445,7 +445,7 @@ static long vsoc_ioctl(struct file * filp,
 	case VSOC_WAIT_FOR_INCOMING_INTERRUPT:
 		wait_event_interruptible(
 			vsoc_dev.regions_data[region_number].wait_queue,
-			(atomic_read(vsoc_dev.regions_data[region_number].incoming_signalled) != 0));
+			(atomic_xchg(vsoc_dev.regions_data[region_number].incoming_signalled, 0) != 0));
 		break;
 	case VSOC_DESCRIBE_REGION:
 		return do_vsoc_describe_region(
@@ -454,7 +454,7 @@ static long vsoc_ioctl(struct file * filp,
 		atomic_set(vsoc_dev.regions_data[region_number].incoming_signalled, 1);
 		wake_up_interruptible(&vsoc_dev.regions_data[region_number].wait_queue);
 	default:
-		printk("VSoC: bad ioctl (\n");
+		printk("VSoC: bad ioctl 0x(%x)\n", cmd);
 	}
 	return 0;
 }
@@ -571,20 +571,27 @@ static ssize_t vsoc_write(struct file * filp, const char * buffer,
 	return len;
 }
 
-static irqreturn_t vsoc_interrupt(int irq, void *dev_instance)
+static irqreturn_t vsoc_interrupt(int irq, void *region_data_v)
 {
-	struct vsoc_device * dev = dev_instance;
+	vsoc_region_data_t *region_data =
+		(vsoc_region_data_t *)region_data_v;
+	int region_number = region_data - vsoc_dev.regions_data;
 
-	if (unlikely(dev == NULL))
+	if (unlikely(region_data == NULL))
 		return IRQ_NONE;
 
-	if (unlikely((irq < 0) || (irq >= dev->layout->region_count))) {
-		printk(KERN_INFO "VSoC: invalid irq (irq = 0x%04x)\n",
-		       irq);
+	if (unlikely((region_number < 0) ||
+		     (region_number >= vsoc_dev.layout->region_count))) {
+		printk(KERN_INFO "VSoC: invalid irq @%p region_number=0x%04x\n",
+		       region_data, region_number);
 		return IRQ_NONE;
 	}
-
-	wake_up_interruptible(&dev->regions_data[irq].wait_queue);
+	if (unlikely((vsoc_dev.regions_data + region_number) != region_data)) {
+		printk(KERN_INFO "VSoC: irq not aligned @%p region_number=0x%04x\n",
+		       region_data, region_number);
+		return IRQ_NONE;
+	}
+	wake_up_interruptible(&region_data->wait_queue);
 	return IRQ_HANDLED;
 }
 
@@ -756,7 +763,8 @@ static int vsoc_probe_device(struct pci_dev *pdev,
 
 		result = request_irq(vsoc_dev.msix_entries[i].vector,
 				     vsoc_interrupt, 0,
-				     vsoc_dev.regions_data[i].name, &vsoc_dev);
+				     vsoc_dev.regions_data[i].name,
+				     vsoc_dev.regions_data + i);
 		if (result) {
 			printk(KERN_INFO "VSoC: request_irq failed irq=%d vector=%d\n",
 			       i, vsoc_dev.msix_entries[i].vector);
