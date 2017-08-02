@@ -260,7 +260,7 @@ static int do_create_fd_scoped_permission(vsoc_device_region* region_p,
 	    vsoc_validate_filep(managed_filp)) {
 		return -EPERM;
 	}
-	// EBUSY if the given fd already has a permission.
+	// EEXIST if the given fd already has a permission.
 	if (((vsoc_private_data_t*)managed_filp->private_data)->
 	    fd_scoped_permission_node) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Fd %d already has a permission\n",
@@ -433,6 +433,7 @@ static long vsoc_ioctl(struct file * filp,
 				&node->permission,
 				sizeof(node->permission)))
 			return -EFAULT;
+		break;
 	}
 	case VSOC_MAYBE_SEND_INTERRUPT_TO_HOST:
 		if (!atomic_xchg(vsoc_dev.regions_data[region_number].outgoing_signalled, 1)) {
