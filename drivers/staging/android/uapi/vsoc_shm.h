@@ -255,4 +255,9 @@ typedef struct {
  */
 #define VSOC_SELF_INTERRUPT _IO(0xF5, 5)
 
+/* This is used to signal the host to scan the guest_to_host_signal_table
+ * for new futexes to wake. This sends an interrupt unconditionally.
+ */
+#define VSOC_SEND_INTERRUPT_TO_HOST _IO(0xF5, 6)
+
 #endif /* _UAPI_LINUX_BINDER_H */

@@ -443,10 +443,13 @@ static long vsoc_ioctl(struct file * filp,
 			return -EBUSY;
 		}
 		break;
+	case VSOC_SEND_INTERRUPT_TO_HOST:
+		writel(region_number, vsoc_dev.regs + Doorbell);
+		return 0;
 	case VSOC_WAIT_FOR_INCOMING_INTERRUPT:
 		wait_event_interruptible(
 			vsoc_dev.regions_data[region_number].wait_queue,
-			(atomic_xchg(vsoc_dev.regions_data[region_number].incoming_signalled, 0) != 0));
+			(atomic_read(vsoc_dev.regions_data[region_number].incoming_signalled) != 0));
 		break;
 	case VSOC_DESCRIBE_REGION:
 		return do_vsoc_describe_region(
