@@ -23,17 +23,10 @@
 #ifndef __VSOC_USB_GADGET_H
 #define __VSOC_USB_GADGET_H
 
-#include <linux/init.h>
-#include <linux/kernel.h>
-#include <linux/list.h>
-#include <linux/module.h>
-#include <linux/spinlock.h>
-#include <linux/usb.h>
-#include <linux/platform_device.h>
+#include "vsoc_usb_common.h"
 #include <linux/usb/gadget.h>
 
-#define	VSOC_USB_FIFO_SIZE	64
-#define VSOC_USB_MAX_NUM_UDC  1
+#define	VSOC_USB_FIFO_SIZE   64
 #define VSOC_USB_MAX_STREAMS 16
 
 struct vsoc_usb_gadget_ep {
@@ -73,15 +66,5 @@ extern const char ep0name[];
 int vsoc_usb_gadget_get_num_endpoints(void);
 const char *vsoc_usb_gadget_get_ep_name(int i);
 const struct usb_ep_caps *vsoc_usb_gadget_get_ep_caps(int i);
-
-#if defined(DEBUG)
-#define dbg(format, arg...) \
-	printk(KERN_DEBUG format, ##arg)
-#else
-#define dbg(format, arg...) \
-({                          \
-     if(0);                 \
-})
-#endif
 
 #endif /* __VSOC_USB_GADGET_H */

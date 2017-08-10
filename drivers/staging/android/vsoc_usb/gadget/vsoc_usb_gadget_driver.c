@@ -41,8 +41,8 @@ static inline struct vsoc_usb_gadget *gadget_to_vsoc_gadget(struct usb_gadget
 	return container_of(gadget, struct vsoc_usb_gadget, gadget);
 }
 
-static inline struct vsoc_usb_gadget *vsoc_gadget_ep_to_vsoc_gadget(
-	struct vsoc_usb_gadget_ep *gep)
+static inline struct vsoc_usb_gadget
+*vsoc_gadget_ep_to_vsoc_gadget(struct vsoc_usb_gadget_ep *gep)
 {
 	return container_of(gep->gadget, struct vsoc_usb_gadget, gadget);
 }
@@ -52,12 +52,11 @@ static inline struct device *udc_dev(struct vsoc_usb_gadget *vsoc_gadget)
 	return vsoc_gadget->gadget.dev.parent;
 }
 
-static inline struct vsoc_usb_gadget_request *usb_req_to_vsoc_usb_gadget_req(
-	struct usb_request *usb_req)
+static inline struct vsoc_usb_gadget_request
+*usb_req_to_vsoc_usb_gadget_req(struct usb_request *usb_req)
 {
 	return container_of(usb_req, struct vsoc_usb_gadget_request, req);
 }
-
 
 /*
  * This routine is called with vsoc_usb_gadget lock held.
@@ -65,7 +64,7 @@ static inline struct vsoc_usb_gadget_request *usb_req_to_vsoc_usb_gadget_req(
 static void nuke(struct vsoc_usb_gadget *gadget_controller,
 		 struct vsoc_usb_gadget_ep *gep)
 {
-	while(!list_empty(&gep->queue)) {
+	while (!list_empty(&gep->queue)) {
 		struct vsoc_usb_gadget_request *req;
 
 		req = list_entry(gep->queue.next,
@@ -93,7 +92,7 @@ static int gadget_ep_enable(struct usb_ep *ep,
 	dbg("%s\n", __func__);
 	gep = usb_ep_to_vsoc_gadget_ep(ep);
 	if (!ep || !desc || gep->desc || ep->name == ep0name
-		|| desc->bDescriptorType != USB_DT_ENDPOINT)
+	    || desc->bDescriptorType != USB_DT_ENDPOINT)
 		return -EINVAL;
 
 	gadget_controller = vsoc_gadget_ep_to_vsoc_gadget(gep);
@@ -111,13 +110,13 @@ static int gadget_ep_enable(struct usb_ep *ep,
 	 * Debug info for bad settings.
 	 */
 	retval = -EINVAL;
-	switch(usb_endpoint_type(desc)) {
+	switch (usb_endpoint_type(desc)) {
 	case USB_ENDPOINT_XFER_BULK:
 		if (strstr(gep->ep.name, "-iso")
-				|| strstr(gep->ep.name, "-int")) {
+		    || strstr(gep->ep.name, "-int")) {
 			goto done;
 		}
-		switch(gadget_controller->gadget.speed) {
+		switch (gadget_controller->gadget.speed) {
 		case USB_SPEED_SUPER:
 			if (max == 1024)
 				break;
@@ -134,9 +133,9 @@ static int gadget_ep_enable(struct usb_ep *ep,
 		}
 		break;
 	case USB_ENDPOINT_XFER_INT:
-		if (strstr(gep->ep.name, "-iso")) /* bulk is ok */
+		if (strstr(gep->ep.name, "-iso"))	/* bulk is ok */
 			goto done;
-		switch(gadget_controller->gadget.speed) {
+		switch (gadget_controller->gadget.speed) {
 		case USB_SPEED_SUPER:
 		case USB_SPEED_HIGH:
 			if (max <= 1024)
@@ -152,9 +151,9 @@ static int gadget_ep_enable(struct usb_ep *ep,
 		break;
 	case USB_ENDPOINT_XFER_ISOC:
 		if (strstr(gep->ep.name, "-bulk")
-				|| strstr(gep->ep.name, "-int"))
+		    || strstr(gep->ep.name, "-int"))
 			goto done;
-		switch(gadget_controller->gadget.speed) {
+		switch (gadget_controller->gadget.speed) {
 		case USB_SPEED_SUPER:
 		case USB_SPEED_HIGH:
 			if (max <= 1024)
@@ -174,8 +173,8 @@ static int gadget_ep_enable(struct usb_ep *ep,
 	if (usb_ss_max_streams(ep->comp_desc)) {
 		if (!usb_endpoint_xfer_bulk(desc)) {
 			dev_err(udc_dev(gadget_controller), "Can't enable "
-					" stream support on non-bulk ep %s\n",
-					ep->name);
+				" stream support on non-bulk ep %s\n",
+				ep->name);
 			return -EINVAL;
 		}
 		gep->stream_en = 1;
@@ -183,25 +182,24 @@ static int gadget_ep_enable(struct usb_ep *ep,
 	gep->desc = desc;
 
 	dev_dbg(udc_dev(gadget_controller), "enabled %s (ep%d%s-%s) maxpacket "
-			"%d stream %s\n", ep->name,
-			desc->bEndpointAddress & 0x0f,
-			(desc->bEndpointAddress & USB_DIR_IN) ? "in" : "out",
-			({ char *val;
-			 switch(usb_endpoint_type(desc)) {
-			 case USB_ENDPOINT_XFER_BULK:
-				val = "bulk";
-				break;
-			 case USB_ENDPOINT_XFER_ISOC:
-				val = "isoc";
-				break;
-			 case USB_ENDPOINT_XFER_INT:
-				val = "int";
-				break;
-			 default:
-				val = "ctrl";
-				break;
-			 } val; }),
-			max, gep->stream_en ? "enabled" : "disabled");
+		"%d stream %s\n", ep->name,
+		desc->bEndpointAddress & 0x0f,
+		(desc->bEndpointAddress & USB_DIR_IN) ? "in" : "out", ( {
+								       char
+								       *val;
+								       switch
+								       (usb_endpoint_type
+									(desc))
+								       {
+case USB_ENDPOINT_XFER_BULK:
+val = "bulk"; break; case USB_ENDPOINT_XFER_ISOC:
+val = "isoc"; break; case USB_ENDPOINT_XFER_INT:
+val = "int"; break; default:
+								       val =
+								       "ctrl";
+								       break;}
+								       val;}
+		), max, gep->stream_en ? "enabled" : "disabled") ;
 
 	gep->halted = gep->wedged = 0;
 	retval = 0;
@@ -283,7 +281,7 @@ static int set_halt_and_wedge(struct usb_ep *ep, int value, int wedged)
 	dbg("%s\n", __func__);
 	if (!ep)
 		return -EINVAL;
-	gep =  usb_ep_to_vsoc_gadget_ep(ep);
+	gep = usb_ep_to_vsoc_gadget_ep(ep);
 	controller = vsoc_gadget_ep_to_vsoc_gadget(gep);
 
 	if (!controller->driver)
@@ -292,7 +290,7 @@ static int set_halt_and_wedge(struct usb_ep *ep, int value, int wedged)
 	if (!value)
 		gep->halted = gep->wedged = 0;
 	else if (gep->desc && (gep->desc->bEndpointAddress & USB_DIR_IN) &&
-			!list_empty(&gep->queue))
+		 !list_empty(&gep->queue))
 		return -EAGAIN;
 	else {
 		gep->halted = 1;
@@ -503,7 +501,7 @@ int vsoc_usb_gadget_probe(struct platform_device *pdev)
 	gadget_controller = *((void **)dev_get_platdata(&pdev->dev));
 	gadget_controller->gadget.name = gadget_name;
 	gadget_controller->gadget.ops = &vsoc_gadget_ops;
-	gadget_controller->gadget.max_speed = USB_SPEED_SUPER;
+	gadget_controller->gadget.max_speed = USB_SPEED_HIGH;
 	gadget_controller->gadget.dev.parent = &pdev->dev;
 	initialize_vsoc_usb_gadget(gadget_controller);
 	INIT_LIST_HEAD(&gadget_controller->fifo_req.queue);

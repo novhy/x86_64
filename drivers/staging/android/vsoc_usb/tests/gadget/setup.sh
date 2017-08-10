@@ -15,10 +15,12 @@ function gadget_prepare {
     echo "VSoC USB Test Device" > strings/0x409/product
     mkdir -p configs/c.1/strings/0x409/
     echo "Config: Test Configuration" > configs/c.1/strings/0x409/configuration
-    mkdir -p functions/mass_storage.usb0
-    ln -s functions/mass_storage.usb0 configs/c.1
-    echo "vsoc_usb_udc.0" > UDC
-    #echo "dummy_hcd.0" > UDC
+#    mkdir -p functions/mass_storage.usb0
+    mkdir -p functions/Loopback.usb0
+#    ln -s functions/mass_storage.usb0 configs/c.1
+    ln -s functions/Loopback.usb0 configs/c.1
+#    echo "vsoc_usb_udc.0" > UDC
+    echo "dummy_udc.0" > UDC
     cd $HOME
 }
 

@@ -25,7 +25,7 @@
 
 const char gadget_name[] = "vsoc_usb_udc";
 const char ep0name[] = "ep0";
-struct platform_device *vsoc_udc_pdev[VSOC_USB_MAX_NUM_UDC];
+struct platform_device *vsoc_udc_pdev[VSOC_USB_MAX_NUM_CONTROLLER];
 const struct {
 	const char *name;
 	const struct usb_ep_caps caps;
@@ -38,18 +38,18 @@ const struct {
 
 	EP_INFO(ep0name,
 		USB_EP_CAPS(USB_EP_CAPS_TYPE_CONTROL, USB_EP_CAPS_DIR_ALL)),
-	EP_INFO("ep1in-bulk",
-		USB_EP_CAPS(USB_EP_CAPS_TYPE_BULK, USB_EP_CAPS_DIR_IN)),
-	EP_INFO("ep1out-bulk",
-		USB_EP_CAPS(USB_EP_CAPS_TYPE_BULK, USB_EP_CAPS_DIR_OUT)),
-	EP_INFO("ep2in-int",
-		USB_EP_CAPS(USB_EP_CAPS_TYPE_INT, USB_EP_CAPS_DIR_IN)),
-	EP_INFO("ep2out-iso",
-		USB_EP_CAPS(USB_EP_CAPS_TYPE_ISO, USB_EP_CAPS_DIR_OUT)),
-	EP_INFO("ep3out",
-		USB_EP_CAPS(USB_EP_CAPS_TYPE_ALL, USB_EP_CAPS_DIR_OUT)),
-	EP_INFO("ep3in",
-		USB_EP_CAPS(USB_EP_CAPS_TYPE_ALL, USB_EP_CAPS_DIR_IN)),
+	    EP_INFO("ep1in-bulk",
+		    USB_EP_CAPS(USB_EP_CAPS_TYPE_BULK, USB_EP_CAPS_DIR_IN)),
+	    EP_INFO("ep1out-bulk",
+		    USB_EP_CAPS(USB_EP_CAPS_TYPE_BULK, USB_EP_CAPS_DIR_OUT)),
+	    EP_INFO("ep2in-int",
+		    USB_EP_CAPS(USB_EP_CAPS_TYPE_INT, USB_EP_CAPS_DIR_IN)),
+	    EP_INFO("ep2out-iso",
+		    USB_EP_CAPS(USB_EP_CAPS_TYPE_ISO, USB_EP_CAPS_DIR_OUT)),
+	    EP_INFO("ep3out",
+		    USB_EP_CAPS(USB_EP_CAPS_TYPE_ALL, USB_EP_CAPS_DIR_OUT)),
+	    EP_INFO("ep3in",
+		    USB_EP_CAPS(USB_EP_CAPS_TYPE_ALL, USB_EP_CAPS_DIR_IN)),
 #undef EP_INFO
 };
 
@@ -84,7 +84,7 @@ static int __init vsoc_usb_gadget_init(void)
 {
 	int retval = -ENOMEM;
 	int i;
-	struct vsoc_usb_gadget *gadget_controller[VSOC_USB_MAX_NUM_UDC];
+	struct vsoc_usb_gadget *gadget_controller[VSOC_USB_MAX_NUM_CONTROLLER];
 
 	dbg("%s\n", __func__);
 	memset(gadget_controller, 0, sizeof(gadget_controller));
@@ -92,7 +92,7 @@ static int __init vsoc_usb_gadget_init(void)
 	if (usb_disabled())
 		return -ENODEV;
 
-	for (i = 0; i < VSOC_USB_MAX_NUM_UDC; i++) {
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		vsoc_udc_pdev[i] = platform_device_alloc(gadget_name, i);
 		if (!vsoc_udc_pdev[i]) {
 			retval = -ENOMEM;
@@ -100,23 +100,23 @@ static int __init vsoc_usb_gadget_init(void)
 		}
 	}
 
-	for (i = 0; i < VSOC_USB_MAX_NUM_UDC; i++) {
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		gadget_controller[i] = kzalloc(sizeof(struct vsoc_usb_gadget),
-				      GFP_KERNEL);
+					       GFP_KERNEL);
 		if (!gadget_controller[i]) {
 			retval = -ENOMEM;
 			goto err_alloc_pdata;
 		}
 
 		gadget_controller[i]->gep =
-			kzalloc(sizeof(struct vsoc_usb_gadget_ep) *
-					   NUM_ENDPOINTS, GFP_KERNEL);
+		    kzalloc(sizeof(struct vsoc_usb_gadget_ep) *
+			    NUM_ENDPOINTS, GFP_KERNEL);
 		if (!gadget_controller[i]->gep) {
 			goto err_alloc_pdata;
 		}
 	}
 
-	for (i = 0; i < VSOC_USB_MAX_NUM_UDC; i++) {
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		retval = platform_device_add_data(vsoc_udc_pdev[i],
 						  &gadget_controller[i],
 						  sizeof(void *));
@@ -128,7 +128,7 @@ static int __init vsoc_usb_gadget_init(void)
 	if (retval < 0)
 		goto err_driver_register;
 
-	for (i = 0; i < VSOC_USB_MAX_NUM_UDC; i++) {
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		retval = platform_device_add(vsoc_udc_pdev[i]);
 		if (retval)
 			goto err_device_add;
@@ -137,7 +137,7 @@ static int __init vsoc_usb_gadget_init(void)
 	return 0;
 
 err_device_add:
-	for (i = 0; i < VSOC_USB_MAX_NUM_UDC; i++) {
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		platform_device_del(vsoc_udc_pdev[i]);
 	}
 
@@ -146,14 +146,14 @@ err_device_add:
 err_driver_register:
 err_add_pdata:
 err_alloc_pdata:
-	for (i = 0; i < VSOC_USB_MAX_NUM_UDC; i++) {
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		/* Checks for NULL */
 		kfree(gadget_controller[i]->gep);
 		kfree(gadget_controller[i]);
 	}
 
 err_alloc_udc:
-	for (i = 0; i < VSOC_USB_MAX_NUM_UDC; i++)
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++)
 		/* Checks for NULL */
 		platform_device_put(vsoc_udc_pdev[i]);
 
@@ -164,10 +164,10 @@ static void __exit vsoc_usb_gadget_exit(void)
 {
 	int i;
 	dbg("%s\n", __func__);
-	for (i = 0; i < VSOC_USB_MAX_NUM_UDC; i++) {
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		struct vsoc_usb_gadget *gadget_controller;
 		gadget_controller =
-			*((void **)dev_get_platdata(&vsoc_udc_pdev[i]->dev));
+		    *((void **)dev_get_platdata(&vsoc_udc_pdev[i]->dev));
 		platform_device_unregister(vsoc_udc_pdev[i]);
 		kfree(gadget_controller->gep);
 		kfree(gadget_controller);
@@ -181,6 +181,6 @@ static void __exit vsoc_usb_gadget_exit(void)
 module_init(vsoc_usb_gadget_init);
 module_exit(vsoc_usb_gadget_exit);
 
-MODULE_LICENSE("Dual BSD/GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("VSoC USB Gadget Controller Driver");
 MODULE_AUTHOR("Google Inc.");

@@ -1,5 +1,5 @@
 /*
- * Android VSoC USB Driver.
+ * Part of Android VSoC USB Host Controller Driver.
  *
  * Copyright (C) 2017 Google, Inc.
  *
@@ -20,17 +20,76 @@
  *  Copyright (C) 2003-2005 Alan Stern
  */
 
-#include <linux/init.h>
-#include <linux/module.h>
+#include "vsoc_usb_hcd.h"
+#include "vsoc_usb_hcd_driver.h"
+#include "vsoc_usb_shm.h"
+
+const char hcd_name[] = "vsoc_usb_hcd";
+
+struct platform_device *vsoc_hcd_pdev[VSOC_USB_MAX_NUM_CONTROLLER];
+
+static struct platform_driver vsoc_usb_hcd_driver = {
+	.probe = vsoc_usb_hcd_probe,
+	.remove = vsoc_usb_hcd_remove,
+	.suspend = vsoc_usb_hcd_suspend,
+	.resume = vsoc_usb_hcd_resume,
+	.driver = {
+		   .name = (char *)hcd_name,
+		   },
+};
 
 static int __init vsoc_usb_hcd_init(void)
 {
+	int retval = -ENOMEM;
+	int i;
+
+	if (usb_disabled())
+		return -ENODEV;
+
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
+		vsoc_hcd_pdev[i] = platform_device_alloc(hcd_name, i);
+		if (!vsoc_hcd_pdev[i]) {
+			retval = -ENOMEM;
+			goto err_alloc_hcd;
+		}
+	}
+
+	retval = platform_driver_register(&vsoc_usb_hcd_driver);
+	if (retval < 0)
+		goto err_alloc_hcd;
+
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
+		retval = platform_device_add(vsoc_hcd_pdev[i]);
+		if (retval < 0) {
+			i--;
+			while (i >= 0)
+				platform_device_del(vsoc_hcd_pdev[i--]);
+			goto err_device_add;
+		}
+	}
 	printk(KERN_INFO "VSoC USB Host Controller Driver loaded.\n");
 	return 0;
+
+err_device_add:
+	platform_driver_unregister(&vsoc_usb_hcd_driver);
+err_alloc_hcd:
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
+		/* Checks for NULL */
+		platform_device_put(vsoc_hcd_pdev[i]);
+	}
+
+	return retval;
 }
 
 static void __exit vsoc_usb_hcd_exit(void)
 {
+	int i;
+
+	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
+		platform_device_unregister(vsoc_hcd_pdev[i]);
+	}
+
+	platform_driver_unregister(&vsoc_usb_hcd_driver);
 	printk(KERN_INFO "VSoC USB Host Controller Driver unloaded.\n");
 	return;
 }
@@ -38,6 +97,6 @@ static void __exit vsoc_usb_hcd_exit(void)
 module_init(vsoc_usb_hcd_init);
 module_exit(vsoc_usb_hcd_exit);
 
-MODULE_LICENSE("Dual BSD/GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("VSoC USB Host Controller Driver");
 MODULE_AUTHOR("Google Inc.");
