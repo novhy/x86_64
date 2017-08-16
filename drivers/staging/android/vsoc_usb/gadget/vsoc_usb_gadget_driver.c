@@ -184,22 +184,23 @@ static int gadget_ep_enable(struct usb_ep *ep,
 	dev_dbg(udc_dev(gadget_controller), "enabled %s (ep%d%s-%s) maxpacket "
 		"%d stream %s\n", ep->name,
 		desc->bEndpointAddress & 0x0f,
-		(desc->bEndpointAddress & USB_DIR_IN) ? "in" : "out", ( {
-								       char
-								       *val;
-								       switch
-								       (usb_endpoint_type
-									(desc))
-								       {
-case USB_ENDPOINT_XFER_BULK:
-val = "bulk"; break; case USB_ENDPOINT_XFER_ISOC:
-val = "isoc"; break; case USB_ENDPOINT_XFER_INT:
-val = "int"; break; default:
-								       val =
-								       "ctrl";
-								       break;}
-								       val;}
-		), max, gep->stream_en ? "enabled" : "disabled") ;
+		(desc->bEndpointAddress & USB_DIR_IN) ? "in" : "out",
+		( {
+		  char *val;
+		  switch (usb_endpoint_type (desc)) {
+		  case USB_ENDPOINT_XFER_BULK:
+			val = "bulk";
+			break;
+		  case USB_ENDPOINT_XFER_ISOC:
+			val = "isoc";
+			break;
+		  case USB_ENDPOINT_XFER_INT:
+			val = "int";
+			break;
+		  default:
+			val = "ctrl";
+			break;
+		} val;}), max, gep->stream_en ? "enabled" : "disabled") ;
 
 	gep->halted = gep->wedged = 0;
 	retval = 0;
@@ -410,6 +411,12 @@ static int gadget_udc_start(struct usb_gadget *gadget,
 	    gadget_to_vsoc_gadget(gadget);
 
 	dbg("%s\n", __func__);
+	if (gadget_controller->usb_regs->magic != VSOC_USB_SHM_MAGIC)
+		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
+	else {
+		dbg("%s usb shm magic matched\n", __func__);
+	}
+
 	if (driver->max_speed == USB_SPEED_UNKNOWN)
 		return -EINVAL;
 

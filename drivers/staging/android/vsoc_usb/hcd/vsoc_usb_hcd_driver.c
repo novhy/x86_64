@@ -33,7 +33,20 @@ static struct vsoc_hcd *hcd_to_vsoc_hcd(struct usb_hcd *hcd)
 
 static int vsoc_hcd_setup(struct usb_hcd *hcd)
 {
+	struct vsoc_usb_regs *usb_regs;
 	dbg("%s\n", __func__);
+
+	usb_regs = *((void **)dev_get_platdata(hcd->self.controller));
+	if (!usb_regs) {
+		dbg("%s couldn't get pointer to usb shared mem\n", __func__);
+		return -ENODEV;
+	}
+
+	if (usb_regs->magic != VSOC_USB_SHM_MAGIC)
+		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
+	else {
+		dbg("%s usb shm magic matched\n", __func__);
+	}
 
 	hcd->self.sg_tablesize = ~0;
 
@@ -81,15 +94,37 @@ static void vsoc_hcd_stop(struct usb_hcd *hcd)
 static int vsoc_hcd_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
 				gfp_t mem_flags)
 {
+	struct vsoc_hcd *vsoc_hcd;
+	unsigned long flags;
+	int rc;
+
 	dbg("%s\n", __func__);
-	return 0;
+	vsoc_hcd = hcd_to_vsoc_hcd(hcd);
+	spin_lock_irqsave(&vsoc_hcd->vsoc_hcd_lock, flags);
+	rc = usb_hcd_link_urb_to_ep(hcd, urb);
+	if (rc)
+		goto done;
+	if (usb_pipetype(urb->pipe) == PIPE_CONTROL)
+		urb->error_count = 1;
+
+done:
+	spin_unlock_irqrestore(&vsoc_hcd->vsoc_hcd_lock, flags);
+	return rc;
 }
 
 static int vsoc_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
 				int status)
 {
+	struct vsoc_hcd *vsoc_hcd;
+	unsigned long flags;
+	int rc;
+
 	dbg("%s\n", __func__);
-	return 0;
+	vsoc_hcd = hcd_to_vsoc_hcd(hcd);
+	spin_lock_irqsave(&vsoc_hcd->vsoc_hcd_lock, flags);
+	rc = usb_hcd_check_unlink_urb(hcd, urb, status);
+	spin_unlock_irqrestore(&vsoc_hcd->vsoc_hcd_lock, flags);
+	return rc;
 }
 
 static int vsoc_hcd_get_frame(struct usb_hcd *hcd)
@@ -116,10 +151,71 @@ static inline void vsoc_hub_descriptor(struct usb_hub_descriptor *desc)
 	desc->u.hs.DeviceRemovable[1] = 0xff;
 }
 
+static void vsoc_set_link_state_by_speed(struct vsoc_hcd *vsoc_hcd)
+{
+	if ((vsoc_hcd->port_status & USB_PORT_STAT_POWER) == 0) {
+		vsoc_hcd->port_status = 0;
+	} else {
+		vsoc_hcd->port_status |= USB_PORT_STAT_CONNECTION;
+		if ((vsoc_hcd->old_status & USB_PORT_STAT_CONNECTION) == 0)
+			vsoc_hcd->port_status |= (USB_PORT_STAT_C_CONNECTION <<
+						  16);
+		if ((vsoc_hcd->port_status & USB_PORT_STAT_ENABLE) == 0)
+			vsoc_hcd->port_status &= ~USB_PORT_STAT_SUSPEND;
+		else if (((vsoc_hcd->port_status & USB_PORT_STAT_SUSPEND) == 0)
+			 && (vsoc_hcd->rh_state != VSOC_HCD_RH_SUSPENDED))
+			vsoc_hcd->active = 1;
+	}
+}
+
+/*
+ * TODO (romitd): Implement the actual shared memory based signalling.
+ */
+static void vsoc_set_link_state(struct vsoc_hcd *vsoc_hcd)
+{
+	dbg("%s\n", __func__);
+
+	vsoc_hcd->active = 0;
+
+	vsoc_set_link_state_by_speed(vsoc_hcd);
+
+	if (((vsoc_hcd->port_status & USB_PORT_STAT_ENABLE) == 0) ||
+	    vsoc_hcd->active)
+		vsoc_hcd->resuming = 0;
+
+	/* Currently !connected or in reset */
+	if (((vsoc_hcd->port_status & USB_PORT_STAT_CONNECTION) == 0) ||
+	    ((vsoc_hcd->port_status & USB_PORT_STAT_RESET) != 0)) {
+		/*
+		   unsigned disconnect = USB_PORT_STAT_CONNECTION &
+		   vsoc_hcd->old_status & (~vsoc_hcd->port_status);
+		   unsigned reset = USB_PORT_STAT_RESET &
+		   (~vsoc_hcd->old_status) & vsoc_hcd->port_status;
+		 */
+
+		dbg("%s %s\n", __func__, "handle reset and disconnect to "
+		    "gadget");
+		/*
+		 * TODO (romitd):
+		 * Report reset and disconnect events to the driver.
+		 */
+	} else if (vsoc_hcd->active != vsoc_hcd->old_active) {
+		dbg("%s %s\n", __func__, "handle suspend and resume");
+		/*
+		 * TODO (romitd):
+		 * Handle suspend and resume.
+		 */
+	}
+
+	vsoc_hcd->old_status = vsoc_hcd->port_status;
+	vsoc_hcd->old_active = vsoc_hcd->active;
+}
+
 static int vsoc_hcd_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				u16 wIndex, char *buf, u16 wLength)
 {
 	struct vsoc_hcd *vsoc_hcd;
+	struct vsoc_usb_regs *usb_regs;
 	int retval = 0;
 	unsigned long flags;
 
@@ -127,6 +223,9 @@ static int vsoc_hcd_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 
 	if (!HCD_HW_ACCESSIBLE(hcd))
 		return -ETIMEDOUT;
+
+	usb_regs = *((void **)dev_get_platdata(hcd->self.controller));
+
 	vsoc_hcd = hcd_to_vsoc_hcd(hcd);
 
 	spin_lock_irqsave(&vsoc_hcd->vsoc_hcd_lock, flags);
@@ -135,8 +234,27 @@ static int vsoc_hcd_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		dbg("%s t:%s\n", __func__, "ClearHubFeature");
 		break;
 	case ClearPortFeature:
-		dbg("%s t:%s v:%04x\n", __func__, "ClearPortFeature", wValue);
+		dbg("%s t:%s v:0x%04x\n", __func__, "ClearPortFeature", wValue);
 		switch (wValue) {
+		case USB_PORT_FEAT_SUSPEND:
+			dbg("%s %s:%s\n", __func__, "ClearPortFeature",
+			    "USB_PORT_FEAT_SUSPEND");
+			if (vsoc_hcd->port_status & USB_PORT_STAT_SUSPEND) {
+				vsoc_hcd->resuming = 1;
+			}
+			break;
+		case USB_PORT_FEAT_POWER:
+			dbg("%s %s:%s\n", __func__, "ClearPortFeature",
+			    "USB_PORT_FEAT_POWER");
+			if (vsoc_hcd->port_status & USB_SS_PORT_STAT_POWER) {
+				dbg("%s %s:%s %s\n", __func__,
+				    "ClearPortFeature", "USB_PORT_FEAT_POWER",
+				    "port_stats has USB_SS_PORT_STAT_POWER");
+			}
+			/* falls through */
+		default:
+			vsoc_hcd->port_status &= ~(1 << wValue);
+			vsoc_set_link_state(vsoc_hcd);
 		}
 		break;
 	case GetHubDescriptor:
@@ -148,23 +266,88 @@ static int vsoc_hcd_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		    "DeviceRequest | USB_REQ_GET_DESCRIPTOR");
 		if (hcd->speed != HCD_USB3)
 			goto error;
-		if ((wValue >> 8) != USB_DT_BOS)
-			goto error;
 		break;
 	case GetHubStatus:
 		dbg("%s t:%s\n", __func__, "GetHubStatus");
+		memset(buf, 0, sizeof(__le32));
 		break;
 	case GetPortStatus:
 		dbg("%s t:%s\n", __func__, "GetPortStatus");
+		if (wIndex != 1)
+			retval = -EPIPE;
+		if (vsoc_hcd->resuming) {
+			vsoc_hcd->port_status |= (USB_PORT_STAT_C_SUSPEND <<
+						  16);
+			vsoc_hcd->port_status &= ~USB_PORT_STAT_SUSPEND;
+		}
+		if ((vsoc_hcd->port_status & USB_PORT_STAT_RESET) != 0) {
+			vsoc_hcd->port_status |= (USB_PORT_STAT_C_RESET << 16);
+			vsoc_hcd->port_status &= ~USB_PORT_STAT_RESET;
+			vsoc_hcd->port_status |= USB_PORT_STAT_ENABLE;
+			/*
+			 * TODO (romitd): remove the assumption that the
+			 * gadget is high speed.
+			 */
+			vsoc_hcd->port_status |= USB_PORT_STAT_HIGH_SPEED;
+
+		}
+		vsoc_set_link_state(vsoc_hcd);
+		((__le16 *) buf)[0] = cpu_to_le16(vsoc_hcd->port_status);
+		((__le16 *) buf)[1] = cpu_to_le16(vsoc_hcd->port_status >> 16);
 		break;
 	case SetHubFeature:
 		dbg("%s t:%s\n", __func__, "SetHubFeature");
+		retval = -EPIPE;
 		break;
 	case SetPortFeature:
-		dbg("%s t:%s\n", __func__, "SetPortFeature");
+		dbg("%s t:%s v:0x%04x\n", __func__, "SetPortFeature", wValue);
+		switch (wValue) {
+		case USB_PORT_FEAT_LINK_STATE:
+			dbg("%s %s:%s\n", __func__, "SetPortFeature",
+			    "USB_PORT_FEAT_LINK_STATE");
+			break;
+		case USB_PORT_FEAT_U1_TIMEOUT:
+		case USB_PORT_FEAT_U2_TIMEOUT:
+			dbg("%s %s:%s\n", __func__, "SetPortFeature",
+			    "USB_PORT_FEAT_U1/U2_STATE");
+			break;
+		case USB_PORT_FEAT_SUSPEND:
+			dbg("%s %s:%s\n", __func__, "SetPortFeature",
+			    "USB_PORT_FEAT_SUSPEND");
+			if (vsoc_hcd->active) {
+				vsoc_hcd->port_status |= USB_PORT_STAT_SUSPEND;
+				vsoc_set_link_state(vsoc_hcd);
+			}
+			break;
+		case USB_PORT_FEAT_POWER:
+			dbg("%s %s:%s\n", __func__, "SetPortFeature",
+			    "USB_PORT_FEAT_POWER");
+			//vsoc_hcd->port_status |= USB_PORT_STAT_POWER;
+			vsoc_set_link_state(vsoc_hcd);
+			break;
+		case USB_PORT_FEAT_BH_PORT_RESET:
+			dbg("%s %s:%s\n", __func__, "SetPortFeature",
+			    "USB_PORT_FEAT_BH_PORT_RESET");
+			/* Falls through */
+		case USB_PORT_FEAT_RESET:
+			dbg("%s %s:%s\n", __func__, "SetPortFeature",
+			    "USB_PORT_FEAT_RESET");
+			vsoc_hcd->port_status &= ~(USB_PORT_STAT_ENABLE |
+						   USB_PORT_STAT_LOW_SPEED |
+						   USB_PORT_STAT_HIGH_SPEED);
+			/*TODO (romitd): Update gadget controller's devstatus */
+
+			/* Falls through */
+		default:
+			if ((vsoc_hcd->port_status & USB_PORT_STAT_POWER) != 0) {
+				vsoc_hcd->port_status |= (1 << wValue);
+				vsoc_set_link_state(vsoc_hcd);
+			}
+		}
 		break;
 	case GetPortErrorCount:
 		dbg("%s t:%s\n", __func__, "GetPortErrorCount");
+		memset(buf, 0, sizeof(__le32));
 		break;
 	case SetHubDepth:
 		dbg("%s t:%s\n", __func__, "SetHubDepth");
@@ -237,10 +420,17 @@ int vsoc_usb_hcd_probe(struct platform_device *pdev)
 {
 	struct usb_hcd *hs_hcd;
 	struct vsoc_hcd *vsoc_hcd;
+	struct vsoc_usb_regs *usb_regs;
 	int retval;
 
 	dbg("%s\n", __func__);
 	dev_info(&pdev->dev, "%s, driver " DRIVER_VERSION "\n", driver_desc);
+
+	usb_regs = *((void **)dev_get_platdata(&pdev->dev));
+	if (!usb_regs) {
+		dbg("%s couldn't get pointer to usb shared mem\n", __func__);
+		return -ENODEV;
+	}
 
 	hs_hcd = usb_create_hcd(&vsoc_hc_driver, &pdev->dev,
 				dev_name(&pdev->dev));

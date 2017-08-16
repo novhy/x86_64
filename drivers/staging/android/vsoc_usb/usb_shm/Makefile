@@ -1,10 +1,7 @@
-obj-m += vsoc_usb_hcd.o
+obj-m += vsoc_usb_shm.o
 ccflags-y := -I$(src)/../common
-ccflags-y += -I$(src)/../usb_shm
 
-KBUILD_EXTRA_SYMBOLS := $(src)/../usb_shm/Module.symvers
-
-vsoc_usb_hcd-objs := vsoc_usb_hcd_main.o vsoc_usb_hcd_driver.o
+vsoc_usb_shm-objs := vsoc_usb_shm_main.o
 
 all:
 	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules

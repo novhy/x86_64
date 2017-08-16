@@ -101,6 +101,7 @@ static int __init vsoc_usb_gadget_init(void)
 	}
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
+		struct vsoc_usb_regs *usb_regs;
 		gadget_controller[i] = kzalloc(sizeof(struct vsoc_usb_gadget),
 					       GFP_KERNEL);
 		if (!gadget_controller[i]) {
@@ -114,6 +115,10 @@ static int __init vsoc_usb_gadget_init(void)
 		if (!gadget_controller[i]->gep) {
 			goto err_alloc_pdata;
 		}
+
+		usb_regs = vsoc_usb_shm_get_regs(i);
+		gadget_controller[i]->usb_regs = usb_regs;
+		spin_lock_init(&(usb_regs->vsoc_usb_status.gadget_status_lock));
 	}
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {

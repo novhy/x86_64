@@ -20,8 +20,8 @@
  *  Copyright (C) 2003-2005 Alan Stern
  */
 
-#ifndef __VSOC_USB_SHM_H
-#define __VSOC_USB_SHM_H
+#ifndef __VSOC_USB_REGS_H
+#define __VSOC_USB_REGS_H
 
 /*
  * Shared memory holds USB packet per Endpoint.
@@ -41,19 +41,37 @@
  * once we the single packet scenario working.
  */
 
+#include <linux/spinlock.h>
+
 struct vsoc_usb_packet_buffer {
 	char buffer[1024];
 };
 
-struct vsoc_usb_controller_intr {
-	u32 ep_intr;
-	u32 device_intr;
+struct vsoc_usb_controller_status {
+	spinlock_t hcd_status_lock;
+	spinlock_t gadget_status_lock;
+	struct {
+		u32 status;
+	} hcd_status;
+
+	struct {
+		u32 status;
+	} gadget_status;
+
+	struct {
+		u32 intr_status;
+	} hcd_ep_intr;
+
+	struct {
+		u32 intr_status;
+	} gadget_ep_inter;
+
 };
 
-struct vsoc_usb_shm {
-	struct vsoc_usb_controller_intr hcd_intr;
-	struct vsoc_usb_controller_intr udc_intr;
+struct vsoc_usb_regs {
+	u32 magic;
+	struct vsoc_usb_controller_status vsoc_usb_status;
 	struct vsoc_usb_packet_buffer in_buf[16];
 	struct vsoc_usb_packet_buffer out_buf[16];
 };
-#endif /* __VSOC_USB_SHM_H */
+#endif /* __VSOC_USB_REGS_H */

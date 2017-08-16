@@ -24,6 +24,8 @@
 #define __VSOC_USB_GADGET_H
 
 #include "vsoc_usb_common.h"
+#include "vsoc_usb_regs.h"
+#include "vsoc_usb_shm.h"
 #include <linux/usb/gadget.h>
 
 #define	VSOC_USB_FIFO_SIZE   64
@@ -58,6 +60,7 @@ struct vsoc_usb_gadget {
 	u16 devstatus;
 	unsigned udc_suspended:1;
 	unsigned pullup:1;
+	struct vsoc_usb_regs *usb_regs;
 };
 
 extern const char gadget_name[];
