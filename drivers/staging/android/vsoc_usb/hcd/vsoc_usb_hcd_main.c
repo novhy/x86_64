@@ -22,7 +22,6 @@
 
 #include "vsoc_usb_hcd.h"
 #include "vsoc_usb_hcd_driver.h"
-#include "vsoc_usb_regs.h"
 
 const char hcd_name[] = "vsoc_usb_hcd";
 
@@ -37,10 +36,6 @@ static struct platform_driver vsoc_usb_hcd_driver = {
 		   .name = (char *)hcd_name,
 		   },
 };
-
-struct vsoc_usb_hw_ops vsoc_usb_hw_ops;
-
-struct vsoc_usb_hw_ops *usb_hw_ops = &vsoc_usb_hw_ops;
 
 static int __init vsoc_usb_hcd_init(void)
 {
@@ -60,7 +55,6 @@ static int __init vsoc_usb_hcd_init(void)
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		struct vsoc_usb_regs *usb_regs = vsoc_usb_shm_get_regs(i);
-		spin_lock_init(&(usb_regs->vsoc_usb_status.hcd_status_lock));
 		retval = platform_device_add_data(vsoc_hcd_pdev[i],
 						  &usb_regs,
 						  sizeof(void *));

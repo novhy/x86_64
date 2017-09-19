@@ -24,6 +24,13 @@
 #define __VSOC_USB_HCD_DRIVER_H
 
 #include "vsoc_usb_hcd.h"
+#include "vsoc_usb_regs.h"
+
+#include <linux/kthread.h>
+#include <linux/freezer.h>
+#include <linux/interrupt.h>
+#include <linux/timer.h>
+#include <linux/wait.h>
 #include <linux/pm.h>
 
 #define PORT_C_MASK \
@@ -35,10 +42,19 @@
 
 #define POWER_BUDGET 500
 
+#define VSOC_HCD_PORT_SUSPEND_MS 20
+#define VSOC_HCD_RESET_MS 50
+#define VSOC_GADGET_RESET_MS 2000
+
 enum vsoc_hcd_rh_state {
 	VSOC_HCD_RH_RESET,
 	VSOC_HCD_RH_SUSPENDED,
 	VSOC_HCD_RH_RUNNING
+};
+
+struct urbp {
+	struct urb *urb;
+	struct list_head urbp_list;
 };
 
 struct vsoc_hcd {
@@ -48,8 +64,14 @@ struct vsoc_hcd {
 	unsigned long timeout;
 	struct usb_device *udev;
 	struct list_head urbp_list;
+	struct timer_list port_connection_timer;
+	struct task_struct *tx_thread, *rx_thread;
+	wait_queue_head_t txq, rxq;
+	struct tasklet_struct hcd_tasklet;
+	unsigned long action;
 	u32 stream_en_ep;
 	u8 num_stream[30 / 2];
+	struct vsoc_usb_regs *regs;
 	unsigned active:1;
 	unsigned old_active:1;
 	unsigned resuming:1;

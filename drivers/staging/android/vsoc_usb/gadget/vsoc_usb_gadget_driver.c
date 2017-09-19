@@ -23,6 +23,13 @@
 #define DEBUG 1
 #include "vsoc_usb_gadget_driver.h"
 
+static int kick_guest_internal(unsigned long data);
+
+struct vsoc_usb_h2g_ops h2g_ops = {
+	.kick = kick_guest_internal,
+	.kick_and_wait = NULL,
+};
+
 static inline struct vsoc_usb_gadget_ep
 *usb_ep_to_vsoc_gadget_ep(struct usb_ep *ep)
 {
@@ -58,12 +65,196 @@ static inline struct vsoc_usb_gadget_request
 	return container_of(usb_req, struct vsoc_usb_gadget_request, req);
 }
 
+
+static int handle_gadget_reset(struct vsoc_usb_gadget
+					 *gadget_controller)
+{
+	int rc = 0;
+	unsigned long flags;
+	dbg("%s\n", __func__);
+
+	spin_lock_irqsave(&gadget_controller->lock, flags);
+	if (gadget_controller->pullup) {
+		dbg("%s got reset with pullup engaged\n", __func__);
+	} else {
+		dbg("%s got reset with pullup disengaged\n", __func__);
+		rc = -ENODEV;
+	}
+	spin_unlock_irqrestore(&gadget_controller->lock, flags);
+	return rc;
+}
+
+/*
+ * This runs with gadget_ctrl_lock held.
+ */
+static unsigned long handle_gadget_intr(struct vsoc_usb_gadget
+					*gadget_controller, unsigned long *intr)
+{
+	if (test_and_clear_bit(H2G_RESET, intr)) {
+		set_bit(H2G_RESET, &gadget_controller->action);
+	}
+
+	return gadget_controller->action;
+}
+
+static void gadget_tasklet(unsigned long data)
+{
+	struct vsoc_usb_gadget *gadget_controller =
+		(struct vsoc_usb_gadget *)data;
+	struct vsoc_usb_regs *usb_regs;
+	struct vsoc_usb_controller_regs *ctrl_regs;
+	unsigned long flags, action, *gadget_intr;
+
+	dbg("%s\n", __func__);
+	usb_regs = gadget_controller->usb_regs;
+	ctrl_regs = &usb_regs->ctrl_regs;
+
+	spin_lock_irqsave(&ctrl_regs->gadget_ctrl_lock, flags);
+	gadget_intr = &ctrl_regs->gadget_reg.intr;
+	if (!*gadget_intr) {
+		spin_unlock_irqrestore(&ctrl_regs->gadget_ctrl_lock, flags);
+		return;
+	}
+
+	action = handle_gadget_intr(gadget_controller, gadget_intr);
+	if (action)
+		wake_up_interruptible(&gadget_controller->rxq);
+	spin_unlock_irqrestore(&ctrl_regs->gadget_ctrl_lock, flags);
+}
+
+static int kick_hcd(struct vsoc_usb_gadget *gadget_controller,
+		    unsigned long bit)
+{
+	struct vsoc_usb_controller_regs *ctrl_regs =
+		&gadget_controller->usb_regs->ctrl_regs;
+	unsigned long flags;
+	int rc = 0;
+
+	dbg("%s\n", __func__);
+
+	/*
+	 * TODO (romitd): set_bit is atomic, so the lock may be removed.
+	 */
+	spin_lock_irqsave(&ctrl_regs->hcd_ctrl_lock, flags);
+	set_bit(bit, &ctrl_regs->hcd_reg.intr);
+	spin_unlock_irqrestore(&ctrl_regs->hcd_ctrl_lock, flags);
+	rc = vsoc_usb_g2h_kick();
+	if (rc)
+		dbg("In %s, vsoc_usb_g2h_kick() failed\n", __func__);
+
+	return rc;
+}
+
+static int kick_guest_internal(unsigned long data)
+{
+	struct vsoc_usb_gadget *gadget_controller =
+		(struct vsoc_usb_gadget *)data;
+	dbg("%s\n", __func__);
+#ifdef DEBUG
+	if (gadget_controller->usb_regs->magic != VSOC_USB_SHM_MAGIC)
+		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
+	else {
+		dbg("%s usb shm magic matched\n", __func__);
+	}
+#endif
+	tasklet_schedule(&gadget_controller->gadget_tasklet);
+
+	return 0;
+}
+
+/* Tx w.r.t. gadget */
+/* TODO (romitd): Placeholder for now */
+static int vsoc_gadget_tx(void *data)
+{
+	struct vsoc_usb_gadget *gadget_controller =
+		(struct vsoc_usb_gadget *)data;
+
+	dbg("%s\n", __func__);
+#ifdef DEBUG
+	if (gadget_controller->usb_regs->magic != VSOC_USB_SHM_MAGIC)
+		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
+	else {
+		dbg("%s usb shm magic matched\n", __func__);
+	}
+#endif
+	set_freezable();
+	for(;;) {
+		set_current_state(TASK_RUNNING);
+		try_to_freeze();
+		if (kthread_should_stop())
+			break;
+		set_current_state(TASK_INTERRUPTIBLE);
+		dbg("%s before sleep\n", __func__);
+		/*
+		 * TODO (romitd):
+		 * The timeout is temporary. With Tx logic coming in, this
+		 * should go away.
+		 */
+		schedule_timeout(MAX_SCHEDULE_TIMEOUT);
+		dbg("%s after wakeup\n", __func__);
+	}
+
+	return 0;
+}
+
+/* Rx w.r.t. gadget */
+static int vsoc_gadget_rx(void *data)
+{
+	unsigned long action, flags;
+	struct vsoc_usb_gadget *gadget_controller =
+		(struct vsoc_usb_gadget *)data;
+
+	struct vsoc_usb_regs *usb_regs;
+	struct vsoc_usb_controller_regs *ctrl_regs;
+	dbg("%s\n", __func__);
+#ifdef DEBUG
+	if (gadget_controller->usb_regs->magic != VSOC_USB_SHM_MAGIC)
+		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
+	else {
+		dbg("%s usb shm magic matched\n", __func__);
+	}
+#endif
+	usb_regs = gadget_controller->usb_regs;
+	ctrl_regs = &usb_regs->ctrl_regs;
+	set_freezable();
+
+	for(;;) {
+		action = 0;
+		set_current_state(TASK_RUNNING);
+		try_to_freeze();
+		if (kthread_should_stop())
+			break;
+		set_current_state(TASK_INTERRUPTIBLE);
+		dbg("%s before sleep\n", __func__);
+		wait_event_interruptible(gadget_controller->rxq,
+				(gadget_controller->action != 0) ||
+				kthread_should_stop());
+		dbg("%s after wakeup\n", __func__);
+		if (kthread_should_stop())
+			break;
+		spin_lock_irqsave(&ctrl_regs->gadget_ctrl_lock, flags);
+		if (test_and_clear_bit(H2G_RESET, &gadget_controller->action))
+			set_bit(H2G_RESET, &action);
+		if (gadget_controller->action)
+			printk(KERN_ERR "Unhandled action in %s\n", __func__);
+		spin_unlock_irqrestore(&ctrl_regs->gadget_ctrl_lock, flags);
+
+		if (test_and_clear_bit(H2G_RESET, &action)) {
+			if (!handle_gadget_reset(gadget_controller))
+				kick_hcd(gadget_controller, RESET_COMPLETE);
+		}
+	}
+
+	return 0;
+}
+
 /*
  * This routine is called with vsoc_usb_gadget lock held.
  */
 static void nuke(struct vsoc_usb_gadget *gadget_controller,
 		 struct vsoc_usb_gadget_ep *gep)
 {
+	dbg("%s\n", __func__);
 	while (!list_empty(&gep->queue)) {
 		struct vsoc_usb_gadget_request *req;
 
@@ -429,8 +620,15 @@ static int gadget_udc_stop(struct usb_gadget *gadget)
 {
 	struct vsoc_usb_gadget *gadget_controller =
 	    gadget_to_vsoc_gadget(gadget);
-	dbg("%s\n", __func__);
 
+	dbg("%s\n", __func__);
+	if (gadget_controller->usb_regs->magic != VSOC_USB_SHM_MAGIC)
+		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
+	else {
+		dbg("%s usb shm magic matched\n", __func__);
+	}
+
+	gadget_controller->devstatus = 0;
 	gadget_controller->driver = NULL;
 
 	return 0;
@@ -469,6 +667,7 @@ static DEVICE_ATTR_RO(function);
 static void initialize_vsoc_usb_gadget(struct vsoc_usb_gadget
 				       *gadget_controller)
 {
+	struct vsoc_usb_controller_regs *ctrl_regs;
 	int i;
 
 	dbg("%s\n", __func__);
@@ -493,6 +692,16 @@ static void initialize_vsoc_usb_gadget(struct vsoc_usb_gadget
 
 	/* removes ep 0 from the gadget ep list */
 	list_del_init(&gadget_controller->gep[0].ep.ep_list);
+
+	init_waitqueue_head(&gadget_controller->txq);
+	init_waitqueue_head(&gadget_controller->rxq);
+
+	ctrl_regs = &gadget_controller->usb_regs->ctrl_regs;
+	spin_lock_init(&ctrl_regs->gadget_ctrl_lock);
+
+	gadget_controller->action = 0;
+	tasklet_init(&gadget_controller->gadget_tasklet, gadget_tasklet,
+		     (unsigned long)gadget_controller);
 }
 
 /*
@@ -521,6 +730,33 @@ int vsoc_usb_gadget_probe(struct platform_device *pdev)
 				&dev_attr_function);
 	if (rc < 0)
 		goto err_dev;
+
+	h2g_ops.data = (unsigned long)gadget_controller;
+	rc = vsoc_usb_register_h2g_ops(&h2g_ops);
+	if (rc < 0)
+		goto err_dev;
+
+	gadget_controller->tx_thread = kthread_run(vsoc_gadget_tx,
+					(void *)gadget_controller,
+					"vsoc_g_tx/%d",
+					gadget_controller->gadget.dev.id);
+	if (IS_ERR(gadget_controller->tx_thread)) {
+		rc = -ENODEV;
+		goto err_dev;
+	}
+
+	gadget_controller->rx_thread = kthread_run(vsoc_gadget_rx,
+					 (void *)gadget_controller,
+					 "vsoc_g_rx/%d",
+					 gadget_controller->gadget.dev.id);
+
+	if (IS_ERR(gadget_controller->rx_thread)) {
+		rc = -ENODEV;
+		kthread_stop(gadget_controller->tx_thread);
+		gadget_controller->tx_thread = NULL;
+		goto err_dev;
+	}
+
 	platform_set_drvdata(pdev, gadget_controller);
 	return 0;
 
@@ -537,6 +773,17 @@ int vsoc_usb_gadget_remove(struct platform_device *pdev)
 	dbg("%s\n", __func__);
 	device_remove_file(&gadget_controller->gadget.dev, &dev_attr_function);
 	usb_del_gadget_udc(&gadget_controller->gadget);
+	vsoc_usb_unregister_h2g_ops();
+	tasklet_kill(&gadget_controller->gadget_tasklet);
+	if (gadget_controller->tx_thread) {
+		kthread_stop(gadget_controller->tx_thread);
+		gadget_controller->tx_thread = NULL;
+	}
+	if (gadget_controller->rx_thread) {
+		kthread_stop(gadget_controller->rx_thread);
+		gadget_controller->rx_thread = NULL;
+	}
+
 	return 0;
 }
 

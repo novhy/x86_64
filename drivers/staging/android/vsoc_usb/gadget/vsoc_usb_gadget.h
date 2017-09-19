@@ -26,7 +26,12 @@
 #include "vsoc_usb_common.h"
 #include "vsoc_usb_regs.h"
 #include "vsoc_usb_shm.h"
+
+#include <linux/kthread.h>
+#include <linux/freezer.h>
+#include <linux/interrupt.h>
 #include <linux/usb/gadget.h>
+#include <linux/wait.h>
 
 #define	VSOC_USB_FIFO_SIZE   64
 #define VSOC_USB_MAX_STREAMS 16
@@ -56,6 +61,10 @@ struct vsoc_usb_gadget {
 	struct usb_gadget gadget;
 	struct usb_gadget_driver *driver;
 	struct vsoc_usb_gadget_request fifo_req;
+	struct task_struct *tx_thread, *rx_thread;
+	wait_queue_head_t txq, rxq;
+	struct tasklet_struct gadget_tasklet;
+	unsigned long action;
 	u8 fifo_buf[VSOC_USB_FIFO_SIZE];
 	u16 devstatus;
 	unsigned udc_suspended:1;

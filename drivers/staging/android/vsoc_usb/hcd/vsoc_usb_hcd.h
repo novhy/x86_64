@@ -30,9 +30,4 @@
 
 extern const const char hcd_name[];
 
-struct vsoc_usb_hw_ops {
-	int (*kick_guest) (void);
-	int (*kick_host) (void);
-};
-
 #endif /* __VSOC_USB_HCD_H */

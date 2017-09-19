@@ -19,12 +19,12 @@ function gadget_prepare {
     mkdir -p functions/Loopback.usb0
 #    ln -s functions/mass_storage.usb0 configs/c.1
     ln -s functions/Loopback.usb0 configs/c.1
-#    echo "vsoc_usb_udc.0" > UDC
-    echo "dummy_udc.0" > UDC
+    echo "vsoc_usb_udc.0" > UDC
+#    echo "dummy_udc.0" > UDC
     cd $HOME
 }
 
-while getopts p: opt "$@"
+while getopts p:t: opt "$@"
 do
     case "${opt}"
     in
@@ -34,5 +34,7 @@ do
 #       modprobe dummy_hcd
        gadget_prepare
         ;;
+    t) gadget_prepare
+	;;
     esac
 done

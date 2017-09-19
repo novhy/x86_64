@@ -26,9 +26,11 @@
 /*
  * Shared memory holds USB packet per Endpoint.
  * To start with, things are simple.
- * Shared memory is divided into regions of 1024 bytes. One per Endpoint.
- * (1024 being the max endpoint size in SS devices).
- * The following is an example of an USB out transfer.
+ * Shared memory is divided into regions of 16KiB. One per Endpoint. (The
+ * selection is based on ADB packet size(16KiB), which is the main use case for
+ * this driver).
+ *
+ * The following is an example of an USB out transfer:
  * Gadget driver queues an usb_request to the UCD.
  * HCD submits an URB. The URB data is broken down into USB ep packets. The ep
  * packet is copied into the shared memory region (corresponding to the ep).
@@ -36,42 +38,63 @@
  * from shared memory into usb_request buffer and notifies the HCD.
  * Once entire URB data is copied by UCD, the HCD completes the URB request.
  * Similarly, the UCD completes the usb_request.
+ * In transfers are similar (except for the direction ofcourse).
  *
- * TODO (romitd): We need to move to multipacket buffers. This will be done
- * once we the single packet scenario working.
+ * Also, the data length for a URB may be different from that of the
+ * corresponding usb_request. This means that there may be 'N' completions of
+ * usb_request(s) for every single completion of URB requests (or vice-versa).
  */
 
 #include <linux/spinlock.h>
 
+#define VSOC_NUM_ENDPOINTS 3
+#define VSOC_ENDPOINT_BUFFER_SIZE (16*(1<<10))
+
 struct vsoc_usb_packet_buffer {
-	char buffer[1024];
+	char buffer[VSOC_ENDPOINT_BUFFER_SIZE];
 };
 
-struct vsoc_usb_controller_status {
-	spinlock_t hcd_status_lock;
-	spinlock_t gadget_status_lock;
-	struct {
-		u32 status;
-	} hcd_status;
-
-	struct {
-		u32 status;
-	} gadget_status;
-
-	struct {
-		u32 intr_status;
-	} hcd_ep_intr;
-
-	struct {
-		u32 intr_status;
-	} gadget_ep_inter;
-
+enum gadget_status_flags {
+	H2G_RESET = 0x1,
 };
 
+enum hcd_status_flags {
+	RESET_COMPLETE = 0x1,
+};
+
+struct vsoc_usb_controller_regs {
+	spinlock_t hcd_ctrl_lock;
+	spinlock_t gadget_ctrl_lock;
+
+	struct {
+		unsigned long intr;
+		unsigned long status;
+	} hcd_reg;
+
+	struct {
+		unsigned long intr;
+		unsigned long status;
+	} gadget_reg;
+
+	struct {
+		unsigned long intr[VSOC_NUM_ENDPOINTS];
+		unsigned long status[VSOC_NUM_ENDPOINTS];
+	} hcd_ep_reg;
+
+	struct {
+		unsigned long intr[VSOC_NUM_ENDPOINTS];
+		unsigned long status[VSOC_NUM_ENDPOINTS];
+	} gadget_ep_reg;
+};
+
+/*
+ * TODO (romitd) better alignment for potential performance improvements.
+ */
 struct vsoc_usb_regs {
 	u32 magic;
-	struct vsoc_usb_controller_status vsoc_usb_status;
-	struct vsoc_usb_packet_buffer in_buf[16];
-	struct vsoc_usb_packet_buffer out_buf[16];
+	struct vsoc_usb_controller_regs ctrl_regs;
+	struct vsoc_usb_packet_buffer in_buf[VSOC_NUM_ENDPOINTS];
+	struct vsoc_usb_packet_buffer out_buf[VSOC_NUM_ENDPOINTS];
 };
+
 #endif /* __VSOC_USB_REGS_H */

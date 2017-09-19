@@ -14,6 +14,7 @@ import unittest
 # TODO(romitd):
 # Cleanup the USB configuration, configfs entries.
 #
+
 class TestModuleLoading(unittest.TestCase):
     def setUp(self):
         self.km = kmod.Kmod()

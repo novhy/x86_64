@@ -42,18 +42,10 @@ const struct {
 		    USB_EP_CAPS(USB_EP_CAPS_TYPE_BULK, USB_EP_CAPS_DIR_IN)),
 	    EP_INFO("ep1out-bulk",
 		    USB_EP_CAPS(USB_EP_CAPS_TYPE_BULK, USB_EP_CAPS_DIR_OUT)),
-	    EP_INFO("ep2in-int",
-		    USB_EP_CAPS(USB_EP_CAPS_TYPE_INT, USB_EP_CAPS_DIR_IN)),
-	    EP_INFO("ep2out-iso",
-		    USB_EP_CAPS(USB_EP_CAPS_TYPE_ISO, USB_EP_CAPS_DIR_OUT)),
-	    EP_INFO("ep3out",
-		    USB_EP_CAPS(USB_EP_CAPS_TYPE_ALL, USB_EP_CAPS_DIR_OUT)),
-	    EP_INFO("ep3in",
-		    USB_EP_CAPS(USB_EP_CAPS_TYPE_ALL, USB_EP_CAPS_DIR_IN)),
 #undef EP_INFO
 };
 
-#define NUM_ENDPOINTS ARRAY_SIZE(ep_info)
+#define ENDPOINT_COUNT ARRAY_SIZE(ep_info)
 
 static struct platform_driver vsoc_usb_gadget_driver = {
 	.probe = vsoc_usb_gadget_probe,
@@ -67,17 +59,17 @@ static struct platform_driver vsoc_usb_gadget_driver = {
 
 int vsoc_usb_gadget_get_num_endpoints(void)
 {
-	return NUM_ENDPOINTS;
+	return VSOC_NUM_ENDPOINTS;
 }
 
 const char *vsoc_usb_gadget_get_ep_name(int i)
 {
-	return ((i < NUM_ENDPOINTS) ? ep_info[i].name : NULL);
+	return ((i < VSOC_NUM_ENDPOINTS) ? ep_info[i].name : NULL);
 }
 
 const struct usb_ep_caps *vsoc_usb_gadget_get_ep_caps(int i)
 {
-	return ((i < NUM_ENDPOINTS) ? &ep_info[i].caps : NULL);
+	return ((i < VSOC_NUM_ENDPOINTS) ? &ep_info[i].caps : NULL);
 }
 
 static int __init vsoc_usb_gadget_init(void)
@@ -85,6 +77,8 @@ static int __init vsoc_usb_gadget_init(void)
 	int retval = -ENOMEM;
 	int i;
 	struct vsoc_usb_gadget *gadget_controller[VSOC_USB_MAX_NUM_CONTROLLER];
+
+	BUILD_BUG_ON((ENDPOINT_COUNT) != (VSOC_NUM_ENDPOINTS));
 
 	dbg("%s\n", __func__);
 	memset(gadget_controller, 0, sizeof(gadget_controller));
@@ -111,14 +105,13 @@ static int __init vsoc_usb_gadget_init(void)
 
 		gadget_controller[i]->gep =
 		    kzalloc(sizeof(struct vsoc_usb_gadget_ep) *
-			    NUM_ENDPOINTS, GFP_KERNEL);
+			    VSOC_NUM_ENDPOINTS, GFP_KERNEL);
 		if (!gadget_controller[i]->gep) {
 			goto err_alloc_pdata;
 		}
 
 		usb_regs = vsoc_usb_shm_get_regs(i);
 		gadget_controller[i]->usb_regs = usb_regs;
-		spin_lock_init(&(usb_regs->vsoc_usb_status.gadget_status_lock));
 	}
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
