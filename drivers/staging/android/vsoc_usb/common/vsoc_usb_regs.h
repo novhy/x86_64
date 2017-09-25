@@ -54,17 +54,21 @@ struct vsoc_usb_packet_buffer {
 	char buffer[VSOC_ENDPOINT_BUFFER_SIZE];
 };
 
-enum gadget_status_flags {
-	H2G_RESET = 0x1,
+enum gadget_intr_bitpos {
+	H2G_RESET = 0x0,
 };
 
-enum hcd_status_flags {
-	RESET_COMPLETE = 0x1,
+enum gadget_status_bitpos {
+	GADGET_PULLUP = 0x0,
+};
+
+enum hcd_intr_bitpos {
+	GADGET_RESET_COMPLETE = 0x0,
+	GADGET_CONN_CHANGE,
 };
 
 struct vsoc_usb_controller_regs {
-	spinlock_t hcd_ctrl_lock;
-	spinlock_t gadget_ctrl_lock;
+	spinlock_t csr_lock;
 
 	struct {
 		unsigned long intr;
@@ -92,7 +96,7 @@ struct vsoc_usb_controller_regs {
  */
 struct vsoc_usb_regs {
 	u32 magic;
-	struct vsoc_usb_controller_regs ctrl_regs;
+	struct vsoc_usb_controller_regs csr;
 	struct vsoc_usb_packet_buffer in_buf[VSOC_NUM_ENDPOINTS];
 	struct vsoc_usb_packet_buffer out_buf[VSOC_NUM_ENDPOINTS];
 };

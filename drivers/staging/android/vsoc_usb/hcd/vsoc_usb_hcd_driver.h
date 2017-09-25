@@ -62,6 +62,7 @@ struct vsoc_hcd {
 	u32 port_status;
 	u32 old_status;
 	unsigned long timeout;
+	struct usb_hcd *hcd;
 	struct usb_device *udev;
 	struct list_head urbp_list;
 	struct timer_list port_connection_timer;
@@ -75,6 +76,7 @@ struct vsoc_hcd {
 	unsigned active:1;
 	unsigned old_active:1;
 	unsigned resuming:1;
+	unsigned gadget_connected:1;
 	spinlock_t vsoc_hcd_lock;
 };
 

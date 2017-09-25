@@ -18,6 +18,7 @@
 
 #define DEBUG 1
 #include "vsoc_usb_shm.h"
+#include <linux/spinlock.h>
 
 struct vsoc_shm_ops {
 	void *(*get_mem) (size_t size, gfp_t flags);
@@ -144,6 +145,7 @@ static int __init vsoc_usb_shm_init(void)
 {
 	int retval;
 	int i;
+	struct vsoc_usb_controller_regs *csr;
 	dbg("%s\n", __func__);
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		vsoc_usb_shm_regs[i] =
@@ -155,6 +157,8 @@ static int __init vsoc_usb_shm_init(void)
 			goto err_get_mem;
 		}
 		vsoc_usb_shm_regs[i]->magic = VSOC_USB_SHM_MAGIC;
+		csr = &vsoc_usb_shm_regs[i]->csr;
+		spin_lock_init(&csr->csr_lock);
 	}
 	spin_lock_init(&h2g_ops_lock);
 	spin_lock_init(&g2h_ops_lock);

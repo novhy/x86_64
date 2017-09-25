@@ -27,6 +27,9 @@
 #define DRIVER_VERSION "Same domain Shared Memory"
 
 static int kick_host_internal(unsigned long data);
+static int handle_gadget_conn_change(struct vsoc_hcd *vsoc_hcd);
+static int vsoc_hcd_bus_suspend(struct usb_hcd *hcd);
+static int vsoc_hcd_bus_resume(struct usb_hcd *hcd);
 
 struct vsoc_usb_g2h_ops g2h_ops = {
 	.kick = kick_host_internal,
@@ -35,9 +38,14 @@ struct vsoc_usb_g2h_ops g2h_ops = {
 
 static const char driver_desc[] = "VSoC USB Host Emulator";
 
-static struct vsoc_hcd *hcd_to_vsoc_hcd(struct usb_hcd *hcd)
+static inline struct vsoc_hcd *hcd_to_vsoc_hcd(struct usb_hcd *hcd)
 {
 	return (struct vsoc_hcd *)(hcd->hcd_priv);
+}
+
+static inline struct usb_hcd *vsoc_hcd_to_hcd(struct vsoc_hcd *vsoc_hcd)
+{
+	return vsoc_hcd->hcd;
 }
 
 /*
@@ -47,8 +55,12 @@ static unsigned long handle_hcd_intr(struct vsoc_hcd *vsoc_hcd, unsigned long
 				     *intr)
 {
 	dbg("%s\n", __func__);
-	if (test_and_clear_bit(RESET_COMPLETE, intr)) {
-		set_bit(RESET_COMPLETE, &vsoc_hcd->action);
+	if (test_and_clear_bit(GADGET_RESET_COMPLETE, intr)) {
+		set_bit(GADGET_RESET_COMPLETE, &vsoc_hcd->action);
+	}
+
+	if (test_and_clear_bit(GADGET_CONN_CHANGE, intr)) {
+		set_bit(GADGET_CONN_CHANGE, &vsoc_hcd->action);
 	}
 
 	return vsoc_hcd->action;
@@ -57,21 +69,21 @@ static unsigned long handle_hcd_intr(struct vsoc_hcd *vsoc_hcd, unsigned long
 static void hcd_tasklet(unsigned long data)
 {
 	struct vsoc_hcd *vsoc_hcd = (struct vsoc_hcd *)data;
-	struct vsoc_usb_controller_regs *ctrl_regs;
+	struct vsoc_usb_controller_regs *csr;
 	unsigned long flags, action, *hcd_intr;
 
 	dbg("%s\n",__func__);
-	ctrl_regs = &vsoc_hcd->regs->ctrl_regs;
-	spin_lock_irqsave(&ctrl_regs->hcd_ctrl_lock, flags);
-	hcd_intr = &ctrl_regs->hcd_reg.intr;
+	csr = &vsoc_hcd->regs->csr;
+	spin_lock_irqsave(&csr->csr_lock, flags);
+	hcd_intr = &csr->hcd_reg.intr;
 	if (!*hcd_intr) {
-		spin_unlock_irqrestore(&ctrl_regs->hcd_ctrl_lock, flags);
+		spin_unlock_irqrestore(&csr->csr_lock, flags);
 		return;
 	}
 	action = handle_hcd_intr(vsoc_hcd, hcd_intr);
 	if (action)
 		wake_up_interruptible(&vsoc_hcd->rxq);
-	spin_unlock_irqrestore(&ctrl_regs->hcd_ctrl_lock, flags);
+	spin_unlock_irqrestore(&csr->csr_lock, flags);
 }
 
 static int kick_host_internal(unsigned long data)
@@ -96,7 +108,7 @@ static int vsoc_hcd_tx(void *data)
 {
 	struct vsoc_hcd *vsoc_hcd = (struct vsoc_hcd *)data;
 	struct vsoc_usb_regs *usb_regs;
-	struct vsoc_usb_controller_regs *ctrl_regs;
+	struct vsoc_usb_controller_regs *csr;
 
 	dbg("%s\n", __func__);
 #ifdef DEBUG
@@ -107,7 +119,7 @@ static int vsoc_hcd_tx(void *data)
 	}
 #endif
 	usb_regs = vsoc_hcd->regs;
-	ctrl_regs = &usb_regs->ctrl_regs;
+	csr = &usb_regs->csr;
 	set_freezable();
 
 	for(;;) {
@@ -134,7 +146,7 @@ static int vsoc_hcd_rx(void *data)
 	unsigned long action, flags;
 	struct vsoc_hcd *vsoc_hcd = (struct vsoc_hcd *)data;
 	struct vsoc_usb_regs *usb_regs;
-	struct vsoc_usb_controller_regs *ctrl_regs;
+	struct vsoc_usb_controller_regs *csr;
 
 	dbg("%s\n", __func__);
 #ifdef DEBUG
@@ -145,7 +157,7 @@ static int vsoc_hcd_rx(void *data)
 	}
 #endif
 	usb_regs = vsoc_hcd->regs;
-	ctrl_regs = &usb_regs->ctrl_regs;
+	csr = &usb_regs->csr;
 	set_freezable();
 
 	for(;;) {
@@ -162,15 +174,26 @@ static int vsoc_hcd_rx(void *data)
 		if (kthread_should_stop())
 			break;
 
-		spin_lock_irqsave(&ctrl_regs->hcd_ctrl_lock, flags);
-		if (test_and_clear_bit(RESET_COMPLETE, &vsoc_hcd->action))
-			set_bit(RESET_COMPLETE, &action);
+		spin_lock_irqsave(&vsoc_hcd->vsoc_hcd_lock, flags);
+		if (test_and_clear_bit(GADGET_RESET_COMPLETE, &vsoc_hcd->action))
+			set_bit(GADGET_RESET_COMPLETE, &action);
+
+		if (test_and_clear_bit(GADGET_CONN_CHANGE,
+				       &vsoc_hcd->action))
+			set_bit(GADGET_CONN_CHANGE, &action);
+
 		if (vsoc_hcd->action)
 			printk(KERN_ERR "Unhandled action in %s\n", __func__);
-		spin_unlock_irqrestore(&ctrl_regs->hcd_ctrl_lock, flags);
-		if (test_and_clear_bit(RESET_COMPLETE, &action)) {
+		spin_unlock_irqrestore(&vsoc_hcd->vsoc_hcd_lock, flags);
+
+		if (test_and_clear_bit(GADGET_RESET_COMPLETE, &action)) {
 			del_timer(&vsoc_hcd->port_connection_timer);
-			dbg("%s RESET_COMPLETE\n", __func__);
+			dbg("%s GADGET_RESET_COMPLETE\n", __func__);
+		}
+
+		if (test_and_clear_bit(GADGET_CONN_CHANGE, &action)) {
+			dbg("%s GADGET_CONN_CHANGE\n", __func__);
+			handle_gadget_conn_change(vsoc_hcd);
 		}
 	}
 
@@ -179,7 +202,7 @@ static int vsoc_hcd_rx(void *data)
 
 static int kick_gadget(struct vsoc_hcd *vsoc_hcd, unsigned long bit)
 {
-	struct vsoc_usb_controller_regs *ctrl_regs = &vsoc_hcd->regs->ctrl_regs;
+	struct vsoc_usb_controller_regs *csr = &vsoc_hcd->regs->csr;
 	unsigned long flags;
 	int rc = 0;
 
@@ -188,9 +211,9 @@ static int kick_gadget(struct vsoc_hcd *vsoc_hcd, unsigned long bit)
 	/*
 	 * TODO(romitd): set_bit is atomic, so the lock may be removed.
 	 */
-	spin_lock_irqsave(&ctrl_regs->gadget_ctrl_lock, flags);
-	set_bit(bit, &ctrl_regs->gadget_reg.intr);
-	spin_unlock_irqrestore(&ctrl_regs->gadget_ctrl_lock, flags);
+	spin_lock_irqsave(&csr->csr_lock, flags);
+	set_bit(bit, &csr->gadget_reg.intr);
+	spin_unlock_irqrestore(&csr->csr_lock, flags);
 	rc = vsoc_usb_h2g_kick();
 	if (rc)
 		dbg("In %s, vsoc_usb_h2g_kick() failed\n", __func__);
@@ -207,18 +230,31 @@ static void device_connection_timeout(unsigned long arg)
 	vsoc_hcd = hcd_to_vsoc_hcd((struct usb_hcd *) arg);
 	spin_lock_irqsave(&vsoc_hcd->vsoc_hcd_lock, flags);
 	printk(KERN_INFO "Did not detect Gadget pullup. Powering down!\n");
-	vsoc_hcd->port_status = 0;
+	vsoc_hcd->port_status &= ~USB_PORT_STAT_CONNECTION;
 	vsoc_hcd->port_status |= (USB_PORT_STAT_C_CONNECTION << 16);
 	spin_unlock_irqrestore(&vsoc_hcd->vsoc_hcd_lock, flags);
 	if ((vsoc_hcd->port_status & PORT_C_MASK) != 0)
 		usb_hcd_poll_rh_status((struct usb_hcd *) arg);
 }
 
+static int is_gadget_connected(struct vsoc_hcd *vsoc_hcd)
+{
+	struct vsoc_usb_controller_regs *csr = &vsoc_hcd->regs->csr;
+	unsigned long flags;
+	int connected = 0;
+
+	spin_lock_irqsave(&csr->csr_lock, flags);
+	if (test_bit(GADGET_PULLUP, &csr->gadget_reg.status))
+		connected = 1;
+	spin_unlock_irqrestore(&csr->csr_lock, flags);
+
+	return connected;
+}
+
 static int vsoc_hcd_setup(struct usb_hcd *hcd)
 {
 	struct vsoc_usb_regs *usb_regs;
 	struct vsoc_hcd *vsoc_hcd;
-	struct vsoc_usb_controller_regs *ctrl_regs;
 
 	dbg("%s\n", __func__);
 
@@ -243,16 +279,17 @@ static int vsoc_hcd_setup(struct usb_hcd *hcd)
 		return -ENODEV;
 	}
 
-	if (usb_regs->magic != VSOC_USB_SHM_MAGIC)
+	if (usb_regs->magic != VSOC_USB_SHM_MAGIC) {
 		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
-	else {
+		return -EFAULT;
+	} else {
 		dbg("%s usb shm magic matched\n", __func__);
 		vsoc_hcd->regs = usb_regs;
 	}
 
-	ctrl_regs = &vsoc_hcd->regs->ctrl_regs;
-	spin_lock_init(&ctrl_regs->hcd_ctrl_lock);
 	vsoc_hcd->action = 0;
+
+	vsoc_hcd->gadget_connected = is_gadget_connected(vsoc_hcd);
 
 	hcd->self.sg_tablesize = 0;
 
@@ -387,8 +424,7 @@ static int vsoc_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
 	list_for_each_entry_safe(urbp, tmp, &vsoc_hcd->urbp_list, urbp_list) {
 		if (urb == urbp->urb) {
 			rc = usb_hcd_check_unlink_urb(hcd, urb, status);
-			if (!rc && vsoc_hcd->rh_state != VSOC_HCD_RH_RUNNING &&
-				!list_empty(&vsoc_hcd->urbp_list)) {
+			if (!rc && !list_empty(&vsoc_hcd->urbp_list)) {
 				list_del(&urbp->urbp_list);
 				kfree(urbp);
 				usb_hcd_unlink_urb_from_ep(hcd, urb);
@@ -430,7 +466,7 @@ static void _vsoc_set_link_state(struct vsoc_hcd *vsoc_hcd)
 {
 	if ((vsoc_hcd->port_status & USB_PORT_STAT_POWER) == 0) {
 		vsoc_hcd->port_status = 0;
-	} else {
+	} else if (vsoc_hcd->gadget_connected) {
 		vsoc_hcd->port_status |= USB_PORT_STAT_CONNECTION;
 		if ((vsoc_hcd->old_status & USB_PORT_STAT_CONNECTION) == 0)
 			vsoc_hcd->port_status |= (USB_PORT_STAT_C_CONNECTION <<
@@ -491,8 +527,9 @@ static void vsoc_set_link_state(struct vsoc_hcd *vsoc_hcd)
 				vsoc_hcd->port_status |=
 					(USB_PORT_STAT_C_CONNECTION << 16);
 			}
-		} else if (disconnect)
+		} else if (disconnect) {
 			dbg("%s disconnect in port status\n", __func__);
+		}
 	} else if (vsoc_hcd->active != vsoc_hcd->old_active) {
 		dbg("%s %s\n", __func__, "handle suspend and resume");
 		/*
@@ -581,7 +618,12 @@ static int vsoc_hcd_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				    "ClearPortFeature", "USB_PORT_FEAT_POWER",
 				    "port_stats has USB_SS_PORT_STAT_POWER");
 			}
-			/* falls through */
+			vsoc_hcd->port_status = 0;
+			vsoc_hcd->resuming = 0;
+			break;
+		case USB_PORT_FEAT_ENABLE:
+			vsoc_hcd->port_status &= ~USB_PORT_STAT_HIGH_SPEED;
+			/* Fall through */
 		default:
 			vsoc_hcd->port_status &= ~(1 << wValue);
 			vsoc_set_link_state(vsoc_hcd);
@@ -667,8 +709,6 @@ static int vsoc_hcd_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			vsoc_hcd->port_status &= ~(USB_PORT_STAT_ENABLE |
 						   USB_PORT_STAT_LOW_SPEED |
 						   USB_PORT_STAT_HIGH_SPEED);
-			/*TODO (romitd): Update gadget controller's devstatus */
-
 			/*
 			 * We expect to complete the hcd side of reset in 50ms.
 			 */
@@ -704,6 +744,61 @@ error:
 	return retval;
 }
 
+static int handle_gadget_connect(struct vsoc_hcd *vsoc_hcd)
+{
+	unsigned long flags;
+	int rc = 0;
+
+	dbg("%s\n", __func__);
+	spin_lock_irqsave(&vsoc_hcd->vsoc_hcd_lock, flags);
+	vsoc_hcd->gadget_connected = 1;
+	vsoc_hcd->port_status |= USB_PORT_STAT_CONNECTION |
+		(1 << USB_PORT_FEAT_C_CONNECTION);
+	vsoc_hcd->port_status |= USB_PORT_STAT_HIGH_SPEED;
+	spin_unlock_irqrestore(&vsoc_hcd->vsoc_hcd_lock, flags);
+
+	usb_hcd_poll_rh_status(vsoc_hcd_to_hcd(vsoc_hcd));
+	return rc;
+}
+
+static int handle_gadget_disconnect(struct vsoc_hcd *vsoc_hcd)
+{
+	unsigned long flags;
+	int rc = 0;
+
+	dbg("%s\n", __func__);
+	spin_lock_irqsave(&vsoc_hcd->vsoc_hcd_lock, flags);
+	vsoc_hcd->gadget_connected = 0;
+	vsoc_hcd->port_status = USB_PORT_STAT_POWER;
+	vsoc_hcd->port_status |= (1 << USB_PORT_FEAT_C_CONNECTION);
+	vsoc_hcd->udev = NULL;
+	spin_unlock_irqrestore(&vsoc_hcd->vsoc_hcd_lock, flags);
+
+	usb_hcd_poll_rh_status(vsoc_hcd_to_hcd(vsoc_hcd));
+	return rc;
+}
+
+static int handle_gadget_conn_change(struct vsoc_hcd *vsoc_hcd)
+{
+	unsigned long flags;
+	struct vsoc_usb_controller_regs *csr = &vsoc_hcd->regs->csr;
+	int connected = 0, rc = 0;
+
+	spin_lock_irqsave(&csr->csr_lock, flags);
+	if (test_bit(GADGET_PULLUP, &csr->gadget_reg.status))
+		connected = 1;
+	else
+		connected = 0;
+	spin_unlock_irqrestore(&csr->csr_lock, flags);
+
+	if (connected)
+		rc = handle_gadget_connect(vsoc_hcd);
+	else
+		rc = handle_gadget_disconnect(vsoc_hcd);
+
+	return rc;
+}
+
 static int vsoc_hcd_bus_suspend(struct usb_hcd *hcd)
 {
 	struct vsoc_hcd *vsoc_hcd;
@@ -724,7 +819,6 @@ static int vsoc_hcd_bus_resume(struct usb_hcd *hcd)
 	int rc = 0;
 
 	dbg("%s\n", __func__);
-
 	vsoc_hcd = hcd_to_vsoc_hcd(hcd);
 	spin_lock_irq(&vsoc_hcd->vsoc_hcd_lock);
 	if (!HCD_HW_ACCESSIBLE(hcd)) {
@@ -805,8 +899,9 @@ int vsoc_usb_hcd_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	vsoc_hcd = hcd_to_vsoc_hcd(hs_hcd);
-
+	vsoc_hcd->hcd = hs_hcd;
 	hs_hcd->has_tt = 1;
+
 	g2h_ops.data = (unsigned long)vsoc_hcd;
 	rc = vsoc_usb_register_g2h_ops(&g2h_ops);
 	if (rc < 0)
