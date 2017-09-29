@@ -22,7 +22,7 @@
 #include "vsoc_usb_common.h"
 #include "vsoc_usb_regs.h"
 
-extern struct vsoc_usb_regs *vsoc_usb_shm_get_regs(unsigned int index);
+extern struct vsoc_usb_shm *vsoc_usb_shm_get(unsigned int index);
 
 struct vsoc_usb_h2g_ops {
 	int (*kick)(unsigned long data);
@@ -36,11 +36,11 @@ struct vsoc_usb_g2h_ops {
 	unsigned long data;
 };
 
-/* provided by guest */
+/* called by guest */
 extern int vsoc_usb_register_h2g_ops(struct vsoc_usb_h2g_ops *ops);
 extern int vsoc_usb_unregister_h2g_ops(void);
 
-/* provided by host */
+/* called by host */
 extern int vsoc_usb_register_g2h_ops(struct vsoc_usb_g2h_ops *ops);
 extern int vsoc_usb_unregister_g2h_ops(void);
 

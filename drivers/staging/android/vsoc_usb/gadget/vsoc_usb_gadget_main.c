@@ -57,11 +57,6 @@ static struct platform_driver vsoc_usb_gadget_driver = {
 		   },
 };
 
-int vsoc_usb_gadget_get_num_endpoints(void)
-{
-	return VSOC_NUM_ENDPOINTS;
-}
-
 const char *vsoc_usb_gadget_get_ep_name(int i)
 {
 	return ((i < VSOC_NUM_ENDPOINTS) ? ep_info[i].name : NULL);
@@ -74,32 +69,31 @@ const struct usb_ep_caps *vsoc_usb_gadget_get_ep_caps(int i)
 
 static int __init vsoc_usb_gadget_init(void)
 {
-	int retval = -ENOMEM;
+	int rc = -ENOMEM;
 	int i;
 	struct vsoc_usb_gadget *gadget_controller[VSOC_USB_MAX_NUM_CONTROLLER];
 
 	BUILD_BUG_ON((ENDPOINT_COUNT) != (VSOC_NUM_ENDPOINTS));
 
 	dbg("%s\n", __func__);
-	memset(gadget_controller, 0, sizeof(gadget_controller));
+	if (usb_disabled()) return -ENODEV;
 
-	if (usb_disabled())
-		return -ENODEV;
+	memset(gadget_controller, 0, sizeof(gadget_controller));
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		vsoc_udc_pdev[i] = platform_device_alloc(gadget_name, i);
 		if (!vsoc_udc_pdev[i]) {
-			retval = -ENOMEM;
+			rc = -ENOMEM;
 			goto err_alloc_udc;
 		}
 	}
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
-		struct vsoc_usb_regs *usb_regs;
+		struct vsoc_usb_shm *shm;
 		gadget_controller[i] = kzalloc(sizeof(struct vsoc_usb_gadget),
 					       GFP_KERNEL);
 		if (!gadget_controller[i]) {
-			retval = -ENOMEM;
+			rc = -ENOMEM;
 			goto err_alloc_pdata;
 		}
 
@@ -110,25 +104,25 @@ static int __init vsoc_usb_gadget_init(void)
 			goto err_alloc_pdata;
 		}
 
-		usb_regs = vsoc_usb_shm_get_regs(i);
-		gadget_controller[i]->usb_regs = usb_regs;
+		shm = vsoc_usb_shm_get(i);
+		gadget_controller[i]->shm = shm;
 	}
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
-		retval = platform_device_add_data(vsoc_udc_pdev[i],
+		rc = platform_device_add_data(vsoc_udc_pdev[i],
 						  &gadget_controller[i],
 						  sizeof(void *));
-		if (retval)
+		if (rc)
 			goto err_add_pdata;
 	}
 
-	retval = platform_driver_register(&vsoc_usb_gadget_driver);
-	if (retval < 0)
+	rc = platform_driver_register(&vsoc_usb_gadget_driver);
+	if (rc < 0)
 		goto err_driver_register;
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
-		retval = platform_device_add(vsoc_udc_pdev[i]);
-		if (retval)
+		rc = platform_device_add(vsoc_udc_pdev[i]);
+		if (rc)
 			goto err_device_add;
 	}
 	printk(KERN_INFO "VSoC USB Gadget Controller Driver loaded.\n");
@@ -145,17 +139,16 @@ err_driver_register:
 err_add_pdata:
 err_alloc_pdata:
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
-		/* Checks for NULL */
 		kfree(gadget_controller[i]->gep);
 		kfree(gadget_controller[i]);
 	}
 
 err_alloc_udc:
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++)
-		/* Checks for NULL */
+		/* Checks for NULL internally. */
 		platform_device_put(vsoc_udc_pdev[i]);
 
-	return retval;
+	return rc;
 }
 
 static void __exit vsoc_usb_gadget_exit(void)

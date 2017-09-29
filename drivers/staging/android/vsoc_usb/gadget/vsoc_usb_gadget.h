@@ -46,7 +46,6 @@ struct vsoc_usb_gadget_ep {
 	unsigned wedged:1;
 	unsigned already_seen:1;
 	unsigned setup_state:1;
-	unsigned stream_en:1;
 };
 
 struct vsoc_usb_gadget_request {
@@ -54,28 +53,40 @@ struct vsoc_usb_gadget_request {
 	struct usb_request req;
 };
 
+enum gadget_rx_action_reasons {
+	RX_ACTION_H2G_DATA_OUT_REQ = 0x0,
+	RX_ACTION_H2G_CONTROL_SETUP,
+};
+
+enum gadget_tx_action_reasons {
+	TX_ACTION_H2G_DATA_IN_REQ = 0x0,
+};
+
 struct vsoc_usb_gadget {
-	spinlock_t lock;
-	struct vsoc_usb_gadget_ep *gep;
-	int address;
-	struct usb_gadget gadget;
-	struct usb_gadget_driver *driver;
-	struct vsoc_usb_gadget_request fifo_req;
+	spinlock_t gadget_lock;
+	struct vsoc_usb_shm *shm;
 	struct task_struct *tx_thread, *rx_thread;
+	struct vsoc_usb_gadget_ep *gep;
+	struct usb_gadget_driver *driver;
 	wait_queue_head_t txq, rxq;
 	struct tasklet_struct gadget_tasklet;
-	unsigned long action;
+	unsigned long controller_action;
+	unsigned long rx_action;
+	unsigned long tx_action;
+	unsigned long rx_action_reason[VSOC_NUM_ENDPOINTS];
+	unsigned long tx_action_reason[VSOC_NUM_ENDPOINTS];
+	int address;
+	struct usb_gadget gadget;
+	struct vsoc_usb_gadget_request fifo_req;
 	u8 fifo_buf[VSOC_USB_FIFO_SIZE];
 	u16 devstatus;
 	unsigned udc_suspended:1;
 	unsigned pullup:1;
-	struct vsoc_usb_regs *usb_regs;
 };
 
 extern const char gadget_name[];
 extern const char ep0name[];
 
-int vsoc_usb_gadget_get_num_endpoints(void);
 const char *vsoc_usb_gadget_get_ep_name(int i);
 const struct usb_ep_caps *vsoc_usb_gadget_get_ep_caps(int i);
 

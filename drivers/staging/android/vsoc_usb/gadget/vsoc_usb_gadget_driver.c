@@ -23,120 +23,214 @@
 #define DEBUG 1
 #include "vsoc_usb_gadget_driver.h"
 
-static int kick_guest_internal(unsigned long data);
+static int kick_gadget_internal(unsigned long data);
 
 struct vsoc_usb_h2g_ops h2g_ops = {
-	.kick = kick_guest_internal,
+	.kick = kick_gadget_internal,
 	.kick_and_wait = NULL,
 };
 
-static inline struct vsoc_usb_gadget_ep
-*usb_ep_to_vsoc_gadget_ep(struct usb_ep *ep)
+static struct vsoc_usb_gadget_ep *usb_ep_to_vsoc_gadget_ep(struct usb_ep *ep)
 {
 	return container_of(ep, struct vsoc_usb_gadget_ep, ep);
 }
 
-static inline struct vsoc_usb_gadget *gadget_dev_to_vsoc_gadget(struct device
+static struct vsoc_usb_gadget *gadget_dev_to_vsoc_gadget(struct device
 								*dev)
 {
 	return container_of(dev, struct vsoc_usb_gadget, gadget.dev);
 }
 
-static inline struct vsoc_usb_gadget *gadget_to_vsoc_gadget(struct usb_gadget
+static struct vsoc_usb_gadget *gadget_to_vsoc_gadget(struct usb_gadget
 							    *gadget)
 {
 	return container_of(gadget, struct vsoc_usb_gadget, gadget);
 }
 
-static inline struct vsoc_usb_gadget
-*vsoc_gadget_ep_to_vsoc_gadget(struct vsoc_usb_gadget_ep *gep)
+static struct vsoc_usb_gadget
+	*vsoc_gadget_ep_to_vsoc_gadget(struct vsoc_usb_gadget_ep *gep)
 {
 	return container_of(gep->gadget, struct vsoc_usb_gadget, gadget);
 }
 
-static inline struct device *udc_dev(struct vsoc_usb_gadget *vsoc_gadget)
+static struct device *udc_dev(struct vsoc_usb_gadget *vsoc_gadget)
 {
 	return vsoc_gadget->gadget.dev.parent;
 }
 
-static inline struct vsoc_usb_gadget_request
-*usb_req_to_vsoc_usb_gadget_req(struct usb_request *usb_req)
+static struct vsoc_usb_gadget_request
+	*usb_req_to_vsoc_usb_gadget_req(struct usb_request *usb_req)
 {
 	return container_of(usb_req, struct vsoc_usb_gadget_request, req);
 }
 
-static int handle_gadget_reset(struct vsoc_usb_gadget
-					 *gadget_controller)
+static int handle_gadget_reset(struct vsoc_usb_gadget *gadget_controller)
 {
 	int rc = 0;
 	unsigned long flags;
 	dbg("%s\n", __func__);
 
-	spin_lock_irqsave(&gadget_controller->lock, flags);
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
 	if (gadget_controller->pullup) {
+		/*
+		 * TODO (romitd): Bring all individual endpoint states to init.
+		 */
 		dbg("%s got reset with pullup engaged\n", __func__);
 	} else {
 		dbg("%s got reset with pullup disengaged\n", __func__);
 		rc = -ENODEV;
 	}
-	spin_unlock_irqrestore(&gadget_controller->lock, flags);
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 	return rc;
 }
 
-/*
- * This runs with gadget_ctrl_lock held.
- */
-static unsigned long handle_gadget_intr(struct vsoc_usb_gadget
-					*gadget_controller, unsigned long *intr)
+
+static int handle_gadget_ep_intr_out(struct vsoc_usb_gadget *gadget_controller,
+			      int ep_num)
 {
-	if (test_and_clear_bit(H2G_RESET, intr)) {
-		set_bit(H2G_RESET, &gadget_controller->action);
+	int rc = 0, set_rx_action = 0;
+	unsigned long flags;
+	struct vsoc_usb_shm *shm = gadget_controller->shm;
+	struct vsoc_usb_controller_regs *csr = &shm->csr;
+
+	BUG_ON(!spin_is_locked(&shm->shm_lock));
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	if (test_and_clear_bit(H2G_DATA_OUT_REQ,
+			       &csr->gadget_ep_out_reg[ep_num].intr)) {
+		set_bit(RX_ACTION_H2G_DATA_OUT_REQ,
+			&gadget_controller->rx_action_reason[ep_num]);
+		set_rx_action = 1;
 	}
 
-	return gadget_controller->action;
+	if (test_and_clear_bit(H2G_CONTROL_SETUP,
+			       &csr->gadget_ep_out_reg[ep_num].intr)) {
+		set_bit(RX_ACTION_H2G_CONTROL_SETUP,
+			&gadget_controller->rx_action_reason[ep_num]);
+		set_rx_action = 1;
+	}
+
+	if (set_rx_action)
+		set_bit(ep_num, &gadget_controller->rx_action);
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+
+	return rc;
+}
+
+static int handle_gadget_ep_intr_in(struct vsoc_usb_gadget *gadget_controller,
+			     int ep_num)
+{
+	int rc = 0, set_tx_action = 0;
+	unsigned long flags;
+	struct vsoc_usb_shm *shm = gadget_controller->shm;
+	struct vsoc_usb_controller_regs *csr = &shm->csr;
+
+	BUG_ON(!spin_is_locked(&shm->shm_lock));
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	if (test_and_clear_bit(H2G_DATA_IN_REQ,
+			       &csr->gadget_ep_in_reg[ep_num].intr)) {
+		set_bit(TX_ACTION_H2G_DATA_IN_REQ,
+			 &gadget_controller->tx_action_reason[ep_num]);
+		set_tx_action = 1;
+	}
+	if (set_tx_action)
+		set_bit(ep_num, &gadget_controller->tx_action);
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+
+	return rc;
+}
+
+static int handle_gadget_controller_intr(struct vsoc_usb_gadget *gadget_controller)
+{
+	int rc = 0;
+	unsigned long flags;
+	struct vsoc_usb_shm *shm = gadget_controller->shm;
+	struct vsoc_usb_controller_regs *csr = &shm->csr;
+
+	BUG_ON(!spin_is_locked(&shm->shm_lock));
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	if (test_and_clear_bit(H2G_RESET, &csr->gadget_reg.intr))
+		set_bit(H2G_RESET, &gadget_controller->controller_action);
+	if (test_and_clear_bit(H2G_DISCONNECT, &csr->gadget_reg.intr))
+		set_bit(H2G_DISCONNECT, &gadget_controller->controller_action);
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+	return rc;
+}
+
+static int handle_gadget_intr(struct vsoc_usb_gadget *gadget_controller)
+{
+	int rc = 0;
+	int i;
+	struct vsoc_usb_shm *shm = gadget_controller->shm;
+
+	dbg("%s\n", __func__);
+
+	BUG_ON(!spin_is_locked(&shm->shm_lock));
+	handle_gadget_controller_intr(gadget_controller);
+
+	for (i = 0; i < VSOC_NUM_ENDPOINTS; i++) {
+		handle_gadget_ep_intr_in(gadget_controller, i);
+		handle_gadget_ep_intr_out(gadget_controller, i);
+	}
+
+	return rc;
 }
 
 static void gadget_tasklet(unsigned long data)
 {
 	struct vsoc_usb_gadget *gadget_controller =
 		(struct vsoc_usb_gadget *)data;
-	struct vsoc_usb_regs *usb_regs;
-	struct vsoc_usb_controller_regs *csr;
-	unsigned long flags, action, *gadget_intr;
+	struct vsoc_usb_shm *shm = gadget_controller->shm;
+	unsigned long flags;
+	int rc;
 
 	dbg("%s\n", __func__);
-	usb_regs = gadget_controller->usb_regs;
-	csr = &usb_regs->csr;
 
-	spin_lock_irqsave(&csr->csr_lock, flags);
-	gadget_intr = &csr->gadget_reg.intr;
-	if (!*gadget_intr) {
-		spin_unlock_irqrestore(&csr->csr_lock, flags);
-		return;
-	}
+	spin_lock_irqsave(&shm->shm_lock, flags);
+	rc = handle_gadget_intr(gadget_controller);
+	spin_unlock_irqrestore(&shm->shm_lock, flags);
 
-	action = handle_gadget_intr(gadget_controller, gadget_intr);
-	if (action)
+	if (rc)
+		printk(KERN_ERR "  handle_gadget_intr failed\n");
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	if (gadget_controller->controller_action ||
+	    gadget_controller->rx_action)
 		wake_up_interruptible(&gadget_controller->rxq);
-	spin_unlock_irqrestore(&csr->csr_lock, flags);
+	if (gadget_controller->tx_action)
+		wake_up_interruptible(&gadget_controller->txq);
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 }
 
-static int kick_hcd(struct vsoc_usb_gadget *gadget_controller,
-		    unsigned long bit)
+/*
+ * Generic routine to set interrupt bits in the virtual register area.
+ * controller specific bits if ep_num == -1 && dir == NONE.
+ */
+static int kick_hcd(struct vsoc_usb_gadget *gadget_controller, int ep_num,
+		    enum transaction_direction dir, unsigned long bit)
 {
+	struct vsoc_usb_shm *shm = gadget_controller->shm;
 	struct vsoc_usb_controller_regs *csr =
-		&gadget_controller->usb_regs->csr;
-	unsigned long flags;
+		&gadget_controller->shm->csr;
+	unsigned long flags, *hcd_intr_reg;
 	int rc = 0;
 
 	dbg("%s\n", __func__);
 
-	/*
-	 * TODO (romitd): set_bit is atomic, so the lock may be removed.
-	 */
-	spin_lock_irqsave(&csr->csr_lock, flags);
-	set_bit(bit, &csr->hcd_reg.intr);
-	spin_unlock_irqrestore(&csr->csr_lock, flags);
+	BUG_ON(ep_num >= VSOC_NUM_ENDPOINTS);
+	BUG_ON((dir == NONE) && (ep_num != -1));
+
+	if (ep_num == -1)
+		hcd_intr_reg = &csr->hcd_reg.intr;
+	else
+		hcd_intr_reg = (dir == IN) ? &csr->hcd_ep_in_reg[ep_num].intr :
+					     &csr->hcd_ep_out_reg[ep_num].intr;
+
+	spin_lock_irqsave(&shm->shm_lock, flags);
+	set_bit(bit, hcd_intr_reg);
+	spin_unlock_irqrestore(&shm->shm_lock, flags);
 	rc = vsoc_usb_g2h_kick();
 	if (rc)
 		dbg("In %s, vsoc_usb_g2h_kick() failed\n", __func__);
@@ -144,13 +238,13 @@ static int kick_hcd(struct vsoc_usb_gadget *gadget_controller,
 	return rc;
 }
 
-static int kick_guest_internal(unsigned long data)
+static int kick_gadget_internal(unsigned long data)
 {
 	struct vsoc_usb_gadget *gadget_controller =
 		(struct vsoc_usb_gadget *)data;
 	dbg("%s\n", __func__);
 #ifdef DEBUG
-	if (gadget_controller->usb_regs->magic != VSOC_USB_SHM_MAGIC)
+	if (gadget_controller->shm->magic != VSOC_USB_SHM_MAGIC)
 		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
 	else {
 		dbg("%s usb shm magic matched\n", __func__);
@@ -161,8 +255,73 @@ static int kick_guest_internal(unsigned long data)
 	return 0;
 }
 
-/* Tx w.r.t. gadget */
-/* TODO (romitd): Placeholder for now */
+
+static int vsoc_gadget_handle_ep_tx_events(
+	struct vsoc_usb_gadget *gadget_controller, int ep_num)
+{
+	unsigned long flags;
+	int rc = 0;
+
+	dbg("%s\n", __func__);
+	dbg("   handling ep-%d-IN\n", ep_num);
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	if (test_and_clear_bit(TX_ACTION_H2G_DATA_IN_REQ,
+			       &gadget_controller->tx_action_reason[ep_num])) {
+		dbg("%s  TX_ACTION_H2G_DATA_IN_REQ", __func__);
+	}
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+
+	return rc;
+}
+
+/*
+ * Called from vsoc_gadget_tx
+ */
+static int _vsoc_gadget_tx(struct vsoc_usb_gadget *gadget_controller)
+{
+	unsigned long flags, tx_action;
+	int i, status;
+	set_current_state(TASK_RUNNING);
+	try_to_freeze();
+	set_current_state(TASK_INTERRUPTIBLE);
+	dbg("%s before sleep\n", __func__);
+	wait_event_interruptible(gadget_controller->txq,
+				 gadget_controller->tx_action ||
+				 kthread_should_stop());
+	dbg("%s after wakeup\n", __func__);
+	if (kthread_should_stop())
+		return 1;
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	tx_action = gadget_controller->tx_action;
+	gadget_controller->tx_action = 0;
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+
+	/*
+	 * Go through the pending work per endpoint.
+	 */
+	status = 0;
+	for (i = 0; i < VSOC_NUM_ENDPOINTS && tx_action; i++) {
+		if (test_and_clear_bit(i, &tx_action))
+			status =
+			vsoc_gadget_handle_ep_tx_events(gadget_controller, i);
+		if (status) {
+			printk(KERN_INFO "%s Error in ep-%d IN\n", __func__, i);
+			status = 0;
+		}
+	}
+
+	if (tx_action)
+		printk(KERN_ERR "Unhandled tx_action[%lu] in %s\n", tx_action,
+		       __func__);
+	return 0;
+}
+
+/*
+ * Tx w.r.t. gadget.
+ * Handles IN transactions.
+ */
 static int vsoc_gadget_tx(void *data)
 {
 	struct vsoc_usb_gadget *gadget_controller =
@@ -170,80 +329,133 @@ static int vsoc_gadget_tx(void *data)
 
 	dbg("%s\n", __func__);
 #ifdef DEBUG
-	if (gadget_controller->usb_regs->magic != VSOC_USB_SHM_MAGIC)
+	if (gadget_controller->shm->magic != VSOC_USB_SHM_MAGIC)
 		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
 	else {
 		dbg("%s usb shm magic matched\n", __func__);
 	}
 #endif
 	set_freezable();
-	for(;;) {
-		set_current_state(TASK_RUNNING);
-		try_to_freeze();
-		if (kthread_should_stop())
-			break;
-		set_current_state(TASK_INTERRUPTIBLE);
-		dbg("%s before sleep\n", __func__);
-		/*
-		 * TODO (romitd):
-		 * The timeout is temporary. With Tx logic coming in, this
-		 * should go away.
-		 */
-		schedule_timeout(MAX_SCHEDULE_TIMEOUT);
-		dbg("%s after wakeup\n", __func__);
-	}
+
+	for(;;)
+		if (_vsoc_gadget_tx(gadget_controller)) break;
 
 	return 0;
 }
 
-/* Rx w.r.t. gadget */
+static int vsoc_gadget_handle_controller_events(
+	struct vsoc_usb_gadget *gadget_controller, unsigned long action)
+{
+	int rc = 0;
+
+	dbg("%s\n", __func__);
+
+	if (test_and_clear_bit(H2G_RESET, &action)) {
+		if (!handle_gadget_reset(gadget_controller))
+			kick_hcd(gadget_controller, -1, NONE,
+				 G2H_RESET_COMPLETE);
+	}
+
+	if(action)
+		printk(KERN_ERR "Unhandled controller_action[%lu] in %s",
+		       action, __func__);
+	return rc;
+}
+
+static int vsoc_gadget_handle_ep_rx_events(
+	struct vsoc_usb_gadget *gadget_controller, int ep_num)
+{
+	unsigned long flags;
+	int rc = 0;
+
+	dbg("%s\n", __func__);
+	dbg("   handling ep-%d-OUT\n", ep_num);
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	if (test_and_clear_bit(RX_ACTION_H2G_DATA_OUT_REQ,
+		&gadget_controller->rx_action_reason[ep_num])) {
+		dbg("%s  RX_ACTION_H2G_DATA_OUT_REQ", __func__);
+	}
+
+	if (test_and_clear_bit(RX_ACTION_H2G_CONTROL_SETUP,
+		&gadget_controller->rx_action_reason[ep_num])) {
+		dbg("%s  RX_ACTION_H2G_CONTROL_SETUP", __func__);
+	}
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+
+	return rc;
+}
+
+/*
+ * Called from vsoc_gadget_rx
+ */
+static int _vsoc_gadget_rx(struct vsoc_usb_gadget *gadget_controller)
+{
+	unsigned long flags, controller_action, rx_action;
+	int status, i;
+
+	set_current_state(TASK_RUNNING);
+	try_to_freeze();
+	set_current_state(TASK_INTERRUPTIBLE);
+	dbg("%s before sleep\n", __func__);
+	wait_event_interruptible(gadget_controller->rxq,
+			gadget_controller->controller_action ||
+			gadget_controller->rx_action ||
+			kthread_should_stop());
+	dbg("%s after wakeup\n", __func__);
+	if (kthread_should_stop())
+		return 1;
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	controller_action = gadget_controller->controller_action;
+	gadget_controller->controller_action = 0;
+	rx_action = gadget_controller->rx_action;
+	gadget_controller->rx_action = 0;
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+
+	vsoc_gadget_handle_controller_events(gadget_controller,
+					     controller_action);
+
+	/*
+	 * Go through the pending work per endpoint.
+	 */
+	status = 0;
+	for (i = 0; i < VSOC_NUM_ENDPOINTS && rx_action; i++) {
+		if (test_and_clear_bit(i, &rx_action))
+			status =
+			vsoc_gadget_handle_ep_rx_events(gadget_controller, i);
+		if (status) {
+			printk(KERN_INFO "%s Error in ep-%d OUT\n", __func__, i);
+			status = 0;
+		}
+	}
+
+	if (rx_action)
+		printk(KERN_ERR "Unhandled rx_action[%lu] in %s\n", rx_action,
+		       __func__);
+	return 0;
+}
+
+/*
+ * Rx w.r.t. gadget.
+ * Handles OUT transactions & gadget controller specific events.
+ */
 static int vsoc_gadget_rx(void *data)
 {
-	unsigned long action, flags;
 	struct vsoc_usb_gadget *gadget_controller =
 		(struct vsoc_usb_gadget *)data;
 
-	struct vsoc_usb_regs *usb_regs;
-	struct vsoc_usb_controller_regs *csr;
 	dbg("%s\n", __func__);
 #ifdef DEBUG
-	if (gadget_controller->usb_regs->magic != VSOC_USB_SHM_MAGIC)
+	if (gadget_controller->shm->magic != VSOC_USB_SHM_MAGIC)
 		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
 	else {
 		dbg("%s usb shm magic matched\n", __func__);
 	}
 #endif
-	usb_regs = gadget_controller->usb_regs;
-	csr = &usb_regs->csr;
 	set_freezable();
 
-	for(;;) {
-		action = 0;
-		set_current_state(TASK_RUNNING);
-		try_to_freeze();
-		if (kthread_should_stop())
-			break;
-		set_current_state(TASK_INTERRUPTIBLE);
-		dbg("%s before sleep\n", __func__);
-		wait_event_interruptible(gadget_controller->rxq,
-				(gadget_controller->action != 0) ||
-				kthread_should_stop());
-		dbg("%s after wakeup\n", __func__);
-		if (kthread_should_stop())
-			break;
-		spin_lock_irqsave(&csr->csr_lock, flags);
-		if (test_and_clear_bit(H2G_RESET, &gadget_controller->action))
-			set_bit(H2G_RESET, &action);
-		if (gadget_controller->action)
-			printk(KERN_ERR "Unhandled action in %s\n", __func__);
-		spin_unlock_irqrestore(&csr->csr_lock, flags);
-
-		if (test_and_clear_bit(H2G_RESET, &action)) {
-			if (!handle_gadget_reset(gadget_controller))
-				kick_hcd(gadget_controller,
-					 GADGET_RESET_COMPLETE);
-		}
-	}
+	for(;;)
+		if (_vsoc_gadget_rx(gadget_controller)) break;
 
 	return 0;
 }
@@ -263,12 +475,12 @@ static void nuke(struct vsoc_usb_gadget *gadget_controller,
 		list_del_init(&req->queue);
 		req->req.status = -ESHUTDOWN;
 
-		spin_unlock(&gadget_controller->lock);
+		spin_unlock(&gadget_controller->gadget_lock);
 		/*
 		 * This will call the complete function of the usb_request
 		 */
 		usb_gadget_giveback_request(&gep->ep, &req->req);
-		spin_lock(&gadget_controller->lock);
+		spin_lock(&gadget_controller->gadget_lock);
 	}
 }
 
@@ -308,10 +520,6 @@ static int gadget_ep_enable(struct usb_ep *ep,
 			goto done;
 		}
 		switch (gadget_controller->gadget.speed) {
-		case USB_SPEED_SUPER:
-			if (max == 1024)
-				break;
-			goto done;
 		case USB_SPEED_HIGH:
 			if (max == 512)
 				break;
@@ -327,7 +535,6 @@ static int gadget_ep_enable(struct usb_ep *ep,
 		if (strstr(gep->ep.name, "-iso"))	/* bulk is ok */
 			goto done;
 		switch (gadget_controller->gadget.speed) {
-		case USB_SPEED_SUPER:
 		case USB_SPEED_HIGH:
 			if (max <= 1024)
 				break;
@@ -345,7 +552,6 @@ static int gadget_ep_enable(struct usb_ep *ep,
 		    || strstr(gep->ep.name, "-int"))
 			goto done;
 		switch (gadget_controller->gadget.speed) {
-		case USB_SPEED_SUPER:
 		case USB_SPEED_HIGH:
 			if (max <= 1024)
 				break;
@@ -361,19 +567,10 @@ static int gadget_ep_enable(struct usb_ep *ep,
 	}
 
 	ep->maxpacket = max;
-	if (usb_ss_max_streams(ep->comp_desc)) {
-		if (!usb_endpoint_xfer_bulk(desc)) {
-			dev_err(udc_dev(gadget_controller), "Can't enable "
-				" stream support on non-bulk ep %s\n",
-				ep->name);
-			return -EINVAL;
-		}
-		gep->stream_en = 1;
-	}
 	gep->desc = desc;
 
 	dev_dbg(udc_dev(gadget_controller), "enabled %s (ep%d%s-%s) maxpacket "
-		"%d stream %s\n", ep->name,
+		"%d\n", ep->name,
 		desc->bEndpointAddress & 0x0f,
 		(desc->bEndpointAddress & USB_DIR_IN) ? "in" : "out",
 		( {
@@ -391,7 +588,7 @@ static int gadget_ep_enable(struct usb_ep *ep,
 		  default:
 			val = "ctrl";
 			break;
-		} val;}), max, gep->stream_en ? "enabled" : "disabled") ;
+		} val;}), max) ;
 
 	gep->halted = gep->wedged = 0;
 	retval = 0;
@@ -412,11 +609,10 @@ static int gadget_ep_disable(struct usb_ep *ep)
 		return -EINVAL;
 	gadget_controller = vsoc_gadget_ep_to_vsoc_gadget(gep);
 
-	spin_lock_irqsave(&gadget_controller->lock, flags);
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
 	gep->desc = NULL;
-	gep->stream_en = 0;
 	nuke(gadget_controller, gep);
-	spin_unlock_irqrestore(&gadget_controller->lock, flags);
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 
 	dev_dbg(udc_dev(gadget_controller), "disabled %s\n", ep->name);
 	return 0;
@@ -531,70 +727,80 @@ static int gadget_get_frame(struct usb_gadget *gadget)
 
 static int gadget_wakeup(struct usb_gadget *gadget)
 {
+	unsigned long flags;
+	int rc = 0;
 	struct vsoc_usb_gadget *gadget_controller =
 	    gadget_to_vsoc_gadget(gadget);
 	dbg("%s\n", __func__);
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
 	if (!(gadget_controller->devstatus &
 	      ((1 << USB_DEVICE_B_HNP_ENABLE) |
 	       (1 << USB_DEVICE_REMOTE_WAKEUP))))
-		return -EINVAL;
+		rc = -EINVAL;
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+
 	/*
 	 * TODO(romitd):
 	 * We need to kick the HCD.
 	 */
-
-	return 0;
+	return rc;
 }
 
 static int gadget_set_selfpowered(struct usb_gadget *gadget, int is_selfpowered)
 {
+	unsigned long flags;
 	struct vsoc_usb_gadget *gadget_controller =
 	    gadget_to_vsoc_gadget(gadget);
 	dbg("%s\n", __func__);
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
 	gadget->is_selfpowered = (is_selfpowered != 0);
 	if (gadget->is_selfpowered)
 		gadget_controller->devstatus |= (1 << USB_DEVICE_SELF_POWERED);
 	else
 		gadget_controller->devstatus &= ~(1 << USB_DEVICE_SELF_POWERED);
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 
 	return 0;
 }
 
 static int gadget_pullup(struct usb_gadget *gadget, int is_on)
 {
-	unsigned long gadget_lock_flags, csr_lock_flags;
-
+	unsigned long gadget_lock_flags, shm_lock_flags;
 	struct vsoc_usb_gadget *gadget_controller =
 	    gadget_to_vsoc_gadget(gadget);
-	struct vsoc_usb_controller_regs *csr =
-		&gadget_controller->usb_regs->csr;
+	struct vsoc_usb_shm *shm = gadget_controller->shm;
+	struct vsoc_usb_controller_regs *csr = &shm->csr;
 
 	dbg("%s\n", __func__);
+
 	/*
-	 * TODO (romitd):
-	 * Have a way to support USB_SPEED_HIGH, USB_SPEED_FULL when the basic
-	 * functionality is tested.
+	 * TODO (romitd): On pullup, move all endpoint status to init state.
 	 */
-	if (is_on && gadget_controller->driver)
+	if (is_on && gadget_controller->driver) {
 		gadget_controller->gadget.speed =
 		    gadget_controller->driver->max_speed;
+		gadget_controller->gep[0].ep.maxpacket = 64;
+	}
 
-	spin_lock_irqsave(&gadget_controller->lock, gadget_lock_flags);
+	spin_lock_irqsave(&gadget_controller->gadget_lock, gadget_lock_flags);
 	gadget_controller->pullup = (is_on != 0);
 
-	spin_lock_irqsave(&csr->csr_lock, csr_lock_flags);
+	spin_lock_irqsave(&shm->shm_lock, shm_lock_flags);
 	if (gadget_controller->pullup)
 		set_bit(GADGET_PULLUP, &csr->gadget_reg.status);
 	else
 		clear_bit(GADGET_PULLUP, &csr->gadget_reg.status);
-	spin_unlock_irqrestore(&csr->csr_lock, csr_lock_flags);
+	spin_unlock_irqrestore(&shm->shm_lock, shm_lock_flags);
 
 	/*
 	 * Let the HCD know.
 	 */
-	kick_hcd(gadget_controller, GADGET_CONN_CHANGE);
+	kick_hcd(gadget_controller, -1, NONE, G2H_CONN_CHANGE);
 
-	spin_unlock_irqrestore(&gadget_controller->lock, gadget_lock_flags);
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock,
+			       gadget_lock_flags);
 
 	return 0;
 }
@@ -606,11 +812,11 @@ static int gadget_udc_start(struct usb_gadget *gadget,
 	struct vsoc_usb_gadget *gadget_controller =
 		gadget_to_vsoc_gadget(gadget);
 
-	struct vsoc_usb_regs *usb_regs = gadget_controller->usb_regs;
-	struct vsoc_usb_controller_regs *csr = &usb_regs->csr;
+	struct vsoc_usb_shm *shm = gadget_controller->shm;
+	struct vsoc_usb_controller_regs *csr = &shm->csr;
 
 	dbg("%s\n", __func__);
-	if (usb_regs->magic != VSOC_USB_SHM_MAGIC)
+	if (shm->magic != VSOC_USB_SHM_MAGIC)
 		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
 	else {
 		dbg("%s usb shm magic matched\n", __func__);
@@ -619,31 +825,44 @@ static int gadget_udc_start(struct usb_gadget *gadget,
 	if (driver->max_speed == USB_SPEED_UNKNOWN)
 		return -EINVAL;
 
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
 	gadget_controller->devstatus = 0;
 	gadget_controller->driver = driver;
+	gadget_controller->controller_action = 0;
+	gadget_controller->tx_action = 0;
+	gadget_controller->rx_action = 0;
+	memset(gadget_controller->tx_action_reason, 0,
+	       sizeof(gadget_controller->tx_action_reason));
+	memset(gadget_controller->rx_action_reason, 0,
+	       sizeof(gadget_controller->rx_action_reason));
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 
-	spin_lock_irqsave(&csr->csr_lock, flags);
+	spin_lock_irqsave(&shm->shm_lock, flags);
 	memset(&csr->gadget_reg, 0, sizeof(csr->gadget_reg));
-	memset(&csr->gadget_ep_reg, 0, sizeof(csr->gadget_ep_reg));
-	spin_unlock_irqrestore(&csr->csr_lock, flags);
+	memset(csr->gadget_ep_in_reg, 0, sizeof(csr->gadget_ep_in_reg));
+	memset(csr->gadget_ep_out_reg, 0, sizeof(csr->gadget_ep_out_reg));
+	spin_unlock_irqrestore(&shm->shm_lock, flags);
 
 	return 0;
 }
 
 static int gadget_udc_stop(struct usb_gadget *gadget)
 {
+	unsigned long flags;
 	struct vsoc_usb_gadget *gadget_controller =
 	    gadget_to_vsoc_gadget(gadget);
 
 	dbg("%s\n", __func__);
-	if (gadget_controller->usb_regs->magic != VSOC_USB_SHM_MAGIC)
+	if (gadget_controller->shm->magic != VSOC_USB_SHM_MAGIC)
 		printk(KERN_ERR "%s usb shm magic mismatch\n", __func__);
 	else {
 		dbg("%s usb shm magic matched\n", __func__);
 	}
 
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
 	gadget_controller->devstatus = 0;
 	gadget_controller->driver = NULL;
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 
 	return 0;
 }
@@ -684,8 +903,9 @@ static void initialize_vsoc_usb_gadget(struct vsoc_usb_gadget
 	int i;
 
 	dbg("%s\n", __func__);
+	spin_lock_init(&gadget_controller->gadget_lock);
 	INIT_LIST_HEAD(&gadget_controller->gadget.ep_list);
-	for (i = 0; i < vsoc_usb_gadget_get_num_endpoints(); i++) {
+	for (i = 0; i < VSOC_NUM_ENDPOINTS; i++) {
 		struct vsoc_usb_gadget_ep *gep = &gadget_controller->gep[i];
 		if (!vsoc_usb_gadget_get_ep_name(i))
 			break;
@@ -695,7 +915,6 @@ static void initialize_vsoc_usb_gadget(struct vsoc_usb_gadget
 		list_add_tail(&gep->ep.ep_list,
 			      &gadget_controller->gadget.ep_list);
 		usb_ep_set_maxpacket_limit(&gep->ep, ~0);
-		gep->ep.max_streams = VSOC_USB_MAX_STREAMS;
 		gep->last_io = jiffies;
 		gep->gadget = &gadget_controller->gadget;
 		INIT_LIST_HEAD(&gep->queue);
@@ -709,7 +928,6 @@ static void initialize_vsoc_usb_gadget(struct vsoc_usb_gadget
 	init_waitqueue_head(&gadget_controller->txq);
 	init_waitqueue_head(&gadget_controller->rxq);
 
-	gadget_controller->action = 0;
 	tasklet_init(&gadget_controller->gadget_tasklet, gadget_tasklet,
 		     (unsigned long)gadget_controller);
 }
@@ -801,15 +1019,15 @@ static void vsoc_gadget_controller_pm(struct vsoc_usb_gadget *gadget_controller,
 				      int suspend)
 {
 	dbg("%s\n", __func__);
-	spin_lock_irq(&gadget_controller->lock);
+	spin_lock_irq(&gadget_controller->gadget_lock);
 	gadget_controller->udc_suspended = suspend;
 
 	/*
 	 * TODO(romitd):
-	 * Set the Link state in HCD.
+	 * Notify HCD.
 	 */
 
-	spin_unlock_irq(&gadget_controller->lock);
+	spin_unlock_irq(&gadget_controller->gadget_lock);
 }
 
 int vsoc_usb_gadget_suspend(struct platform_device *pdev, pm_message_t state)

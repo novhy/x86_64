@@ -50,4 +50,15 @@
 })
 #endif
 
+/*
+ * NONE -> Controller specific events (not related to transaction).
+ * IN   -> IN  transactions w.r.t. HCD,
+ * OUT  -> OUT transactions w.r.t. HCD.
+ */
+enum transaction_direction {
+	NONE = 0x0,
+	IN,
+	OUT
+};
+
 #endif /* __VSOC_USB_COMMON_H */

@@ -39,7 +39,7 @@ static struct platform_driver vsoc_usb_hcd_driver = {
 
 static int __init vsoc_usb_hcd_init(void)
 {
-	int retval = -ENOMEM;
+	int rc = -ENOMEM;
 	int i;
 
 	if (usb_disabled())
@@ -48,26 +48,25 @@ static int __init vsoc_usb_hcd_init(void)
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		vsoc_hcd_pdev[i] = platform_device_alloc(hcd_name, i);
 		if (!vsoc_hcd_pdev[i]) {
-			retval = -ENOMEM;
+			rc = -ENOMEM;
 			goto err_alloc_hcd;
 		}
 	}
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
-		struct vsoc_usb_regs *usb_regs = vsoc_usb_shm_get_regs(i);
-		retval = platform_device_add_data(vsoc_hcd_pdev[i],
-						  &usb_regs,
-						  sizeof(void *));
-		if (retval)
+		struct vsoc_usb_shm *shm = vsoc_usb_shm_get(i);
+		rc = platform_device_add_data(vsoc_hcd_pdev[i], &shm,
+					      sizeof(void *));
+		if (rc)
 			goto err_alloc_pdata;
 	}
-	retval = platform_driver_register(&vsoc_usb_hcd_driver);
-	if (retval < 0)
+	rc = platform_driver_register(&vsoc_usb_hcd_driver);
+	if (rc < 0)
 		goto err_alloc_hcd;
 
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
-		retval = platform_device_add(vsoc_hcd_pdev[i]);
-		if (retval < 0) {
+		rc = platform_device_add(vsoc_hcd_pdev[i]);
+		if (rc < 0) {
 			i--;
 			while (i >= 0)
 				platform_device_del(vsoc_hcd_pdev[i--]);
@@ -82,11 +81,11 @@ err_device_add:
 err_alloc_pdata:
 err_alloc_hcd:
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
-		/* Checks for NULL */
+		/* Checks for NULL internally. */
 		platform_device_put(vsoc_hcd_pdev[i]);
 	}
 
-	return retval;
+	return rc;
 }
 
 static void __exit vsoc_usb_hcd_exit(void)

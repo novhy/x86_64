@@ -50,55 +50,81 @@
 #define VSOC_NUM_ENDPOINTS 3
 #define VSOC_ENDPOINT_BUFFER_SIZE (16*(1<<10))
 
-struct vsoc_usb_packet_buffer {
-	char buffer[VSOC_ENDPOINT_BUFFER_SIZE];
+enum hcd_intr_bitpos {
+	G2H_RESET_COMPLETE = 0x0,
+	G2H_CONN_CHANGE,
+	G2H_CONTROL_SETUP_ACK_NEXT_STATUS,
+	G2H_CONTROL_SETUP_ACK_NEXT_IN,
+	G2H_CONTROL_STATUS_ACK_NEXT_OUT,
+	G2H_CONTROL_DATA_OUT_ACK,
+	G2H_CONTROL_STATUS_ACK,
+	G2H_DATA_OUT_ACK,
+};
+
+enum hcd_status_bitpos {
+	HCD_CONNECTED = 0x0,
+	HCD_DISCONNECTED,
 };
 
 enum gadget_intr_bitpos {
 	H2G_RESET = 0x0,
+	H2G_DISCONNECT,
+	H2G_CONTROL_SETUP,
+	H2G_CONTROL_DATA_OUT,
+	H2G_CONTROL_DATA_IN_ACK,
+	H2G_CONTROL_STATUS,
+	H2G_DATA_OUT_REQ,
+	H2G_DATA_IN_REQ,
+	H2G_DATA_IN_ACK,
 };
 
 enum gadget_status_bitpos {
 	GADGET_PULLUP = 0x0,
 };
 
-enum hcd_intr_bitpos {
-	GADGET_RESET_COMPLETE = 0x0,
-	GADGET_CONN_CHANGE,
+/*
+enum ep_state {
+	EP_RESET = 0x0,
+	EP_CONTROL_SETUP,
+	EP_CONTROL_IN,
+	EP_CONTROL_OUT,
+	EP_CONTROL_ACK_WAIT,
+	EP_DATA_IN,
+	EP_DATA_OUT,
+	EP_DATA_ACK_WAIT,
+};
+*/
+
+struct vsoc_usb_packet_buffer {
+	/*	enum ep_state state; */
+	unsigned long data_len; /* bytes remaining to be transferred */
+	char buffer[VSOC_ENDPOINT_BUFFER_SIZE];
+};
+
+
+struct csr {
+	unsigned long intr;
+	unsigned long status;
 };
 
 struct vsoc_usb_controller_regs {
-	spinlock_t csr_lock;
-
-	struct {
-		unsigned long intr;
-		unsigned long status;
-	} hcd_reg;
-
-	struct {
-		unsigned long intr;
-		unsigned long status;
-	} gadget_reg;
-
-	struct {
-		unsigned long intr[VSOC_NUM_ENDPOINTS];
-		unsigned long status[VSOC_NUM_ENDPOINTS];
-	} hcd_ep_reg;
-
-	struct {
-		unsigned long intr[VSOC_NUM_ENDPOINTS];
-		unsigned long status[VSOC_NUM_ENDPOINTS];
-	} gadget_ep_reg;
+	struct csr hcd_reg;
+	struct csr gadget_reg;
+	struct csr hcd_ep_in_reg[VSOC_NUM_ENDPOINTS];
+	struct csr hcd_ep_out_reg[VSOC_NUM_ENDPOINTS];
+	struct csr gadget_ep_in_reg[VSOC_NUM_ENDPOINTS];
+	struct csr gadget_ep_out_reg[VSOC_NUM_ENDPOINTS];
 };
 
 /*
  * TODO (romitd) better alignment for potential performance improvements.
  */
-struct vsoc_usb_regs {
+struct vsoc_usb_shm {
 	u32 magic;
+	spinlock_t shm_lock;
 	struct vsoc_usb_controller_regs csr;
-	struct vsoc_usb_packet_buffer in_buf[VSOC_NUM_ENDPOINTS];
-	struct vsoc_usb_packet_buffer out_buf[VSOC_NUM_ENDPOINTS];
+	struct vsoc_usb_packet_buffer ep_in_buf[VSOC_NUM_ENDPOINTS];
+	struct vsoc_usb_packet_buffer ep_out_buf[VSOC_NUM_ENDPOINTS];
 };
 
 #endif /* __VSOC_USB_REGS_H */

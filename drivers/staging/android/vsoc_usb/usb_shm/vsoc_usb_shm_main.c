@@ -20,6 +20,11 @@
 #include "vsoc_usb_shm.h"
 #include <linux/spinlock.h>
 
+/*
+ * We expect to get the shared memory region differently in intra-domain Vs
+ * inter-domain implementations. This is an indirection to isolate this
+ * separation.
+ */
 struct vsoc_shm_ops {
 	void *(*get_mem) (size_t size, gfp_t flags);
 	void (*put_mem) (const void *ptr);
@@ -31,7 +36,7 @@ static struct vsoc_shm_ops vsoc_shm_ops = {
 };
 
 static struct vsoc_shm_ops *vsoc_shm_helper = &vsoc_shm_ops;
-static struct vsoc_usb_regs *vsoc_usb_shm_regs[VSOC_USB_MAX_NUM_CONTROLLER];
+static struct vsoc_usb_shm *vsoc_usb_shm[VSOC_USB_MAX_NUM_CONTROLLER];
 
 static struct vsoc_usb_h2g_ops h2g_ops;
 static struct vsoc_usb_g2h_ops g2h_ops;
@@ -39,7 +44,7 @@ static struct vsoc_usb_g2h_ops g2h_ops;
 static spinlock_t h2g_ops_lock;
 static spinlock_t g2h_ops_lock;
 
-struct vsoc_usb_regs *vsoc_usb_shm_get_regs(unsigned int index)
+struct vsoc_usb_shm *vsoc_usb_shm_get(unsigned int index)
 {
 	dbg("%s\n", __func__);
 	if (index >= VSOC_USB_MAX_NUM_CONTROLLER) {
@@ -47,9 +52,9 @@ struct vsoc_usb_regs *vsoc_usb_shm_get_regs(unsigned int index)
 		       "region");
 		return NULL;
 	}
-	return vsoc_usb_shm_regs[index];
+	return vsoc_usb_shm[index];
 }
-EXPORT_SYMBOL_GPL(vsoc_usb_shm_get_regs);
+EXPORT_SYMBOL_GPL(vsoc_usb_shm_get);
 
 int vsoc_usb_register_h2g_ops(struct vsoc_usb_h2g_ops *ops)
 {
@@ -61,6 +66,7 @@ int vsoc_usb_register_h2g_ops(struct vsoc_usb_h2g_ops *ops)
 
 	spin_lock_irqsave(&h2g_ops_lock, flags);
 	h2g_ops.kick = ops->kick;
+	h2g_ops.kick_and_wait = ops->kick_and_wait;
 	h2g_ops.data = ops->data;
 	spin_unlock_irqrestore(&h2g_ops_lock, flags);
 
@@ -89,6 +95,7 @@ int vsoc_usb_register_g2h_ops(struct vsoc_usb_g2h_ops *ops)
 
 	spin_lock_irqsave(&g2h_ops_lock, flags);
 	g2h_ops.kick = ops->kick;
+	g2h_ops.kick_and_wait = ops->kick_and_wait;
 	g2h_ops.data = ops->data;
 	spin_unlock_irqrestore(&g2h_ops_lock, flags);
 
@@ -143,22 +150,24 @@ EXPORT_SYMBOL_GPL(vsoc_usb_g2h_kick);
 
 static int __init vsoc_usb_shm_init(void)
 {
-	int retval;
+	int rc;
 	int i;
-	struct vsoc_usb_controller_regs *csr;
 	dbg("%s\n", __func__);
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
-		vsoc_usb_shm_regs[i] =
-		    vsoc_shm_helper->get_mem(sizeof(struct vsoc_usb_regs),
+		vsoc_usb_shm[i] =
+		    vsoc_shm_helper->get_mem(sizeof(struct vsoc_usb_shm),
 					     GFP_KERNEL);
-		if (!vsoc_usb_shm_regs[i]) {
-			retval = -ENOMEM;
+		if (!vsoc_usb_shm[i]) {
+			rc = -ENOMEM;
 			i--;
 			goto err_get_mem;
 		}
-		vsoc_usb_shm_regs[i]->magic = VSOC_USB_SHM_MAGIC;
-		csr = &vsoc_usb_shm_regs[i]->csr;
-		spin_lock_init(&csr->csr_lock);
+
+		/*
+		 * Initialize the shm magic and the spinlock.
+		 */
+		vsoc_usb_shm[i]->magic = VSOC_USB_SHM_MAGIC;
+		spin_lock_init(&vsoc_usb_shm[i]->shm_lock);
 	}
 	spin_lock_init(&h2g_ops_lock);
 	spin_lock_init(&g2h_ops_lock);
@@ -168,10 +177,10 @@ static int __init vsoc_usb_shm_init(void)
 
 err_get_mem:
 	while (i >= 0) {
-		vsoc_shm_helper->put_mem(vsoc_usb_shm_regs[i--]);
+		vsoc_shm_helper->put_mem(vsoc_usb_shm[i--]);
 	}
 
-	return retval;
+	return rc;
 }
 
 static void __exit vsoc_usb_shm_exit(void)
@@ -179,7 +188,7 @@ static void __exit vsoc_usb_shm_exit(void)
 	int i;
 	dbg("%s\n", __func__);
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
-		vsoc_shm_helper->put_mem(vsoc_usb_shm_regs[i]);
+		vsoc_shm_helper->put_mem(vsoc_usb_shm[i]);
 	}
 	printk(KERN_INFO "VSoC USB Shared Memory Helper Driver unloaded.\n");
 	return;
