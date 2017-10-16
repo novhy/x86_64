@@ -25,11 +25,6 @@
 
 static int kick_gadget_internal(unsigned long data);
 
-struct vsoc_usb_h2g_ops h2g_ops = {
-	.kick = kick_gadget_internal,
-	.kick_and_wait = NULL,
-};
-
 static struct vsoc_usb_gadget_ep *usb_ep_to_vsoc_gadget_ep(struct usb_ep *ep)
 {
 	return container_of(ep, struct vsoc_usb_gadget_ep, ep);
@@ -959,10 +954,10 @@ int vsoc_usb_gadget_probe(struct platform_device *pdev)
 	if (rc < 0)
 		goto err_dev;
 
-	h2g_ops.data = (unsigned long)gadget_controller;
-	rc = vsoc_usb_register_h2g_ops(&h2g_ops);
+	rc = vsoc_usb_register_h2g_ipi(kick_gadget_internal,
+				       (unsigned long)gadget_controller);
 	if (rc < 0)
-		goto err_dev;
+		goto err_dev_file;
 
 	gadget_controller->tx_thread = kthread_run(vsoc_gadget_tx,
 					(void *)gadget_controller,
@@ -970,7 +965,7 @@ int vsoc_usb_gadget_probe(struct platform_device *pdev)
 					gadget_controller->gadget.dev.id);
 	if (IS_ERR(gadget_controller->tx_thread)) {
 		rc = -ENODEV;
-		goto err_dev;
+		goto err_kthread;
 	}
 
 	gadget_controller->rx_thread = kthread_run(vsoc_gadget_rx,
@@ -982,12 +977,16 @@ int vsoc_usb_gadget_probe(struct platform_device *pdev)
 		rc = -ENODEV;
 		kthread_stop(gadget_controller->tx_thread);
 		gadget_controller->tx_thread = NULL;
-		goto err_dev;
+		goto err_kthread;
 	}
 
 	platform_set_drvdata(pdev, gadget_controller);
 	return 0;
 
+err_kthread:
+	vsoc_usb_unregister_h2g_ipi();
+err_dev_file:
+	device_remove_file(&gadget_controller->gadget.dev, &dev_attr_function);
 err_dev:
 	usb_del_gadget_udc(&gadget_controller->gadget);
 err_udc:
@@ -1001,7 +1000,7 @@ int vsoc_usb_gadget_remove(struct platform_device *pdev)
 	dbg("%s\n", __func__);
 	device_remove_file(&gadget_controller->gadget.dev, &dev_attr_function);
 	usb_del_gadget_udc(&gadget_controller->gadget);
-	vsoc_usb_unregister_h2g_ops();
+	vsoc_usb_unregister_h2g_ipi();
 	tasklet_kill(&gadget_controller->gadget_tasklet);
 	if (gadget_controller->tx_thread) {
 		kthread_stop(gadget_controller->tx_thread);

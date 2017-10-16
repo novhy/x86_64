@@ -17,8 +17,8 @@
  */
 
 #define DEBUG 1
-#include "vsoc_usb_shm.h"
 #include <linux/spinlock.h>
+#include "vsoc_usb_shm.h"
 
 /*
  * We expect to get the shared memory region differently in intra-domain Vs
@@ -35,14 +35,18 @@ static struct vsoc_shm_ops vsoc_shm_ops = {
 	.put_mem = kfree,
 };
 
+/*
+ * Structure for Cross domain IPI routines
+ */
+struct vsoc_usb_xipi {
+	spinlock_t lock;
+	int (*kick)(unsigned long data);
+	unsigned long data;
+};
+
 static struct vsoc_shm_ops *vsoc_shm_helper = &vsoc_shm_ops;
 static struct vsoc_usb_shm *vsoc_usb_shm[VSOC_USB_MAX_NUM_CONTROLLER];
-
-static struct vsoc_usb_h2g_ops h2g_ops;
-static struct vsoc_usb_g2h_ops g2h_ops;
-
-static spinlock_t h2g_ops_lock;
-static spinlock_t g2h_ops_lock;
+static struct vsoc_usb_xipi h2g_ipi, g2h_ipi;
 
 struct vsoc_usb_shm *vsoc_usb_shm_get(unsigned int index)
 {
@@ -56,63 +60,57 @@ struct vsoc_usb_shm *vsoc_usb_shm_get(unsigned int index)
 }
 EXPORT_SYMBOL_GPL(vsoc_usb_shm_get);
 
-int vsoc_usb_register_h2g_ops(struct vsoc_usb_h2g_ops *ops)
+int vsoc_usb_register_h2g_ipi(int (*kick)(unsigned long data),
+			      unsigned long data)
 {
 	int rc = 0;
 	unsigned long flags;
 	dbg("%s\n", __func__);
-	if (!ops)
-		return -EFAULT;
-
-	spin_lock_irqsave(&h2g_ops_lock, flags);
-	h2g_ops.kick = ops->kick;
-	h2g_ops.kick_and_wait = ops->kick_and_wait;
-	h2g_ops.data = ops->data;
-	spin_unlock_irqrestore(&h2g_ops_lock, flags);
+	spin_lock_irqsave(&h2g_ipi.lock, flags);
+	h2g_ipi.kick = kick;
+	h2g_ipi.data = data;
+	spin_unlock_irqrestore(&h2g_ipi.lock, flags);
 
 	return rc;
 }
-EXPORT_SYMBOL_GPL(vsoc_usb_register_h2g_ops);
+EXPORT_SYMBOL_GPL(vsoc_usb_register_h2g_ipi);
 
-int vsoc_usb_unregister_h2g_ops(void)
+int vsoc_usb_unregister_h2g_ipi(void)
 {
 	unsigned long flags;
 	dbg("%s\n", __func__);
-	spin_lock_irqsave(&h2g_ops_lock, flags);
-	memset(&h2g_ops, 0, sizeof(h2g_ops));
-	spin_unlock_irqrestore(&h2g_ops_lock, flags);
+	spin_lock_irqsave(&h2g_ipi.lock, flags);
+	memset(&h2g_ipi, 0, sizeof(h2g_ipi));
+	spin_unlock_irqrestore(&h2g_ipi.lock, flags);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(vsoc_usb_unregister_h2g_ops);
+EXPORT_SYMBOL_GPL(vsoc_usb_unregister_h2g_ipi);
 
-int vsoc_usb_register_g2h_ops(struct vsoc_usb_g2h_ops *ops)
+int vsoc_usb_register_g2h_ipi(int (*kick)(unsigned long data),
+			      unsigned long data)
 {
 	int rc = 0;
 	unsigned long flags;
 	dbg("%s\n", __func__);
-	if (!ops)
-		return -EFAULT;
-
-	spin_lock_irqsave(&g2h_ops_lock, flags);
-	g2h_ops.kick = ops->kick;
-	g2h_ops.kick_and_wait = ops->kick_and_wait;
-	g2h_ops.data = ops->data;
-	spin_unlock_irqrestore(&g2h_ops_lock, flags);
+	spin_lock_irqsave(&g2h_ipi.lock, flags);
+	g2h_ipi.kick = kick;
+	g2h_ipi.data = data;
+	spin_unlock_irqrestore(&g2h_ipi.lock, flags);
 
 	return rc;
 }
-EXPORT_SYMBOL_GPL(vsoc_usb_register_g2h_ops);
+EXPORT_SYMBOL_GPL(vsoc_usb_register_g2h_ipi);
 
-int vsoc_usb_unregister_g2h_ops(void)
+int vsoc_usb_unregister_g2h_ipi(void)
 {
 	unsigned long flags;
 	dbg("%s\n", __func__);
-	spin_lock_irqsave(&g2h_ops_lock, flags);
-	memset(&g2h_ops, 0, sizeof(g2h_ops));
-	spin_unlock_irqrestore(&g2h_ops_lock, flags);
+	spin_lock_irqsave(&g2h_ipi.lock, flags);
+	memset(&g2h_ipi, 0, sizeof(g2h_ipi));
+	spin_unlock_irqrestore(&g2h_ipi.lock, flags);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(vsoc_usb_unregister_g2h_ops);
+EXPORT_SYMBOL_GPL(vsoc_usb_unregister_g2h_ipi);
 
 int vsoc_usb_h2g_kick(void)
 {
@@ -120,12 +118,12 @@ int vsoc_usb_h2g_kick(void)
 	unsigned long flags;
 	dbg("%s\n", __func__);
 
-	spin_lock_irqsave(&h2g_ops_lock, flags);
-	if (h2g_ops.kick)
-		rc = h2g_ops.kick(h2g_ops.data);
+	spin_lock_irqsave(&h2g_ipi.lock, flags);
+	if (h2g_ipi.kick)
+		rc = h2g_ipi.kick(h2g_ipi.data);
 	else
 		rc = -EFAULT;
-	spin_unlock_irqrestore(&h2g_ops_lock, flags);
+	spin_unlock_irqrestore(&h2g_ipi.lock, flags);
 
 	return rc;
 }
@@ -137,12 +135,12 @@ int vsoc_usb_g2h_kick(void)
 	unsigned long flags;
 	dbg("%s\n", __func__);
 
-	spin_lock_irqsave(&g2h_ops_lock, flags);
-	if (g2h_ops.kick)
-		rc = g2h_ops.kick(g2h_ops.data);
+	spin_lock_irqsave(&g2h_ipi.lock, flags);
+	if (g2h_ipi.kick)
+		rc = g2h_ipi.kick(g2h_ipi.data);
 	else
 		rc = -EFAULT;
-	spin_unlock_irqrestore(&g2h_ops_lock, flags);
+	spin_unlock_irqrestore(&g2h_ipi.lock, flags);
 
 	return rc;
 }
@@ -153,6 +151,9 @@ static int __init vsoc_usb_shm_init(void)
 	int rc;
 	int i;
 	dbg("%s\n", __func__);
+	spin_lock_init(&h2g_ipi.lock);
+	spin_lock_init(&g2h_ipi.lock);
+
 	for (i = 0; i < VSOC_USB_MAX_NUM_CONTROLLER; i++) {
 		vsoc_usb_shm[i] =
 		    vsoc_shm_helper->get_mem(sizeof(struct vsoc_usb_shm),
@@ -169,8 +170,6 @@ static int __init vsoc_usb_shm_init(void)
 		vsoc_usb_shm[i]->magic = VSOC_USB_SHM_MAGIC;
 		spin_lock_init(&vsoc_usb_shm[i]->shm_lock);
 	}
-	spin_lock_init(&h2g_ops_lock);
-	spin_lock_init(&g2h_ops_lock);
 
 	printk(KERN_INFO "VSoC USB Shared Memory Helper Driver loaded.\n");
 	return 0;

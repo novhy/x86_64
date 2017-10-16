@@ -24,27 +24,16 @@
 
 extern struct vsoc_usb_shm *vsoc_usb_shm_get(unsigned int index);
 
-struct vsoc_usb_h2g_ops {
-	int (*kick)(unsigned long data);
-	int (*kick_and_wait)(unsigned long data);
-	unsigned long data;
-};
-
-struct vsoc_usb_g2h_ops {
-	int (*kick)(unsigned long data);
-	int (*kick_and_wait)(unsigned long data);
-	unsigned long data;
-};
-
 /* called by guest */
-extern int vsoc_usb_register_h2g_ops(struct vsoc_usb_h2g_ops *ops);
-extern int vsoc_usb_unregister_h2g_ops(void);
+extern int vsoc_usb_register_h2g_ipi(int (*kick)(unsigned long data),
+				     unsigned long data);
+extern int vsoc_usb_unregister_h2g_ipi(void);
+extern int vsoc_usb_g2h_kick(void);
 
 /* called by host */
-extern int vsoc_usb_register_g2h_ops(struct vsoc_usb_g2h_ops *ops);
-extern int vsoc_usb_unregister_g2h_ops(void);
-
+extern int vsoc_usb_register_g2h_ipi(int (*kick) (unsigned long data),
+				     unsigned long data);
+extern int vsoc_usb_unregister_g2h_ipi(void);
 extern int vsoc_usb_h2g_kick(void);
-extern int vsoc_usb_g2h_kick(void);
 
 #endif /* __VSOC_USB_SHM_H */

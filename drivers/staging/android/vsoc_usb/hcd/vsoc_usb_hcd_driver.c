@@ -30,11 +30,6 @@
 static int kick_hcd_internal(unsigned long data);
 static int handle_gadget_conn_change(struct vsoc_hcd *vsoc_hcd);
 
-struct vsoc_usb_g2h_ops g2h_ops = {
-	.kick = kick_hcd_internal,
-	.kick_and_wait = NULL,
-};
-
 static const char driver_desc[] = "VSoC USB Host Emulator";
 
 static struct vsoc_hcd *hcd_to_vsoc_hcd(struct usb_hcd *hcd)
@@ -1281,8 +1276,8 @@ int vsoc_usb_hcd_probe(struct platform_device *pdev)
 	vsoc_hcd->shm = shm;
 	hcd->has_tt = 1;
 
-	g2h_ops.data = (unsigned long)vsoc_hcd;
-	rc = vsoc_usb_register_g2h_ops(&g2h_ops);
+	rc = vsoc_usb_register_g2h_ipi(kick_hcd_internal,
+				       (unsigned long)vsoc_hcd);
 	if (rc < 0)
 		goto put_usb2_hcd;
 
@@ -1298,7 +1293,7 @@ int vsoc_usb_hcd_probe(struct platform_device *pdev)
 	if (!rc)
 		return 0;
 
-	vsoc_usb_unregister_g2h_ops();
+	vsoc_usb_unregister_g2h_ipi();
 put_usb2_hcd:
 	usb_put_hcd(hcd);
 
@@ -1311,7 +1306,7 @@ int vsoc_usb_hcd_remove(struct platform_device *pdev)
 
 	dbg("%s\n", __func__);
 	hcd = platform_get_drvdata(pdev);
-	vsoc_usb_unregister_g2h_ops();
+	vsoc_usb_unregister_g2h_ipi();
 	usb_remove_hcd(hcd);
 	usb_put_hcd(hcd);
 	return 0;
