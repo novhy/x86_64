@@ -52,27 +52,38 @@ enum vsoc_hcd_rh_state {
 	VSOC_HCD_RH_RUNNING
 };
 
-enum vsoc_hcd_urb_state {
-	VSOC_URB_INIT,
-	VSOC_URB_INFLIGHT,
+/*
+ * State of a transaction marked in an URBP.
+ */
+enum vsoc_hcd_ep_transaction_state {
+	INIT_STATE = 0x0,
+	CONTROL_SETUP_STATE,
+	CONTROL_SETUP_ACK_WAIT_STATE,
+	CONTROL_IN_START_STATE,
+	CONTROL_IN_STATE,
+	CONTROL_OUT_START_STATE,
+	CONTROL_OUT_STATE,
+	CONTROL_STATUS_STATE,
+	DATA_IN_STATE,
+	DATA_IN_ACK_STATE,
+	DATA_OUT_STATE,
+	DATA_OUT_ACK_STATE,
+	EP_NAK_STATE,
+	TRANSFER_COMPLETE_STATE,
 };
 
 struct urbp {
 	struct urb *urb;
 	struct list_head urbp_list;
-	enum vsoc_hcd_urb_state urb_state;
+	unsigned long transaction_state;
 };
 
-enum hcd_rx_action_reasons {
-	RX_ACTION_H2G_DATA_IN_REQ = 0x0,
-	RX_ACTION_H2G_CONTROL_IN,
-};
+/*
+ * The top bit in the transaction state will be set if the URB is in flight.
+ */
+#define URB_IN_FLIGHT_BIT \
+	(sizeof(((struct urbp *)(0))->transaction_state) * 8 - 1)
 
-enum hcd_tx_action_reasons {
-	TX_ACTION_H2G_DATA_OUT_REQ = 0x0,
-	TX_ACTION_H2G_CONTROL_SETUP,
-	TX_ACTION_H2G_CONTROL_OUT,
-};
 
 /*
  * TODO (romitd): Document the fields of this structure
@@ -85,30 +96,40 @@ struct vsoc_hcd {
 	struct usb_device *udev;
 	/*
 	 * TODO (romitd):
+	 * This assumes we have only one port in the root hub.
 	 * If we support multiple devices we should have a pair of list_head
-	 * arrays per address (corresponding to each device). Should be a simple
-	 * change (USB hub supports a max of 127 devices).
+	 * arrays per gadget (corresponding to a unique USB address). Should be
+	 * a simple change (USB hub supports a max of 127 devices).
 	 */
 	struct list_head urbp_list_in[VSOC_NUM_ENDPOINTS];
 	struct list_head urbp_list_out[VSOC_NUM_ENDPOINTS];
 
+	/* Timer to handle disconnected gadget during startup */
 	struct timer_list port_connection_timer;
+
 	wait_queue_head_t txq, rxq;
 	struct tasklet_struct hcd_tasklet;
-	unsigned long controller_action;
-	unsigned long rx_action;
-	unsigned long tx_action;
+	unsigned long controller_action; /* bits specific to controller */
+	unsigned long rx_action; /* bit represting pending Rx ep activity */
+	unsigned long tx_action; /* bit representing pending Tx ep activity */
+
+	/* action reason for each pair of Tx and Rx ep */
 	unsigned long rx_action_reason[VSOC_NUM_ENDPOINTS];
 	unsigned long tx_action_reason[VSOC_NUM_ENDPOINTS];
-	enum vsoc_hcd_rh_state rh_state;
+
+	enum vsoc_hcd_rh_state rh_state; /* state of the root hub */
+
+	/* port status, used during connection change */
 	u32 port_status;
 	u32 old_status;
-	unsigned long timeout;
+	unsigned long timeout; /* timeout value during enumeration */
+
 	unsigned active:1;
 	unsigned old_active:1;
 	unsigned resuming:1;
 	unsigned gadget_connected:1;
 };
+
 
 int vsoc_usb_hcd_probe(struct platform_device *pdev);
 int vsoc_usb_hcd_remove(struct platform_device *pdev);

@@ -91,16 +91,23 @@ static int handle_gadget_ep_intr_out(struct vsoc_usb_gadget *gadget_controller,
 	BUG_ON(!spin_is_locked(&shm->shm_lock));
 
 	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
-	if (test_and_clear_bit(H2G_DATA_OUT_REQ,
+	if (test_and_clear_bit(H2G_DATA_OUT,
 			       &csr->gadget_ep_out_reg[ep_num].intr)) {
-		set_bit(RX_ACTION_H2G_DATA_OUT_REQ,
+		set_bit(H2G_DATA_OUT,
 			&gadget_controller->rx_action_reason[ep_num]);
 		set_rx_action = 1;
 	}
 
 	if (test_and_clear_bit(H2G_CONTROL_SETUP,
 			       &csr->gadget_ep_out_reg[ep_num].intr)) {
-		set_bit(RX_ACTION_H2G_CONTROL_SETUP,
+		set_bit(H2G_CONTROL_SETUP,
+			&gadget_controller->rx_action_reason[ep_num]);
+		set_rx_action = 1;
+	}
+
+	if (test_and_clear_bit(H2G_CONTROL_DATA_OUT,
+			       &csr->gadget_ep_out_reg[ep_num].intr)) {
+		set_bit(H2G_CONTROL_DATA_OUT,
 			&gadget_controller->rx_action_reason[ep_num]);
 		set_rx_action = 1;
 	}
@@ -123,12 +130,19 @@ static int handle_gadget_ep_intr_in(struct vsoc_usb_gadget *gadget_controller,
 	BUG_ON(!spin_is_locked(&shm->shm_lock));
 
 	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
-	if (test_and_clear_bit(H2G_DATA_IN_REQ,
+	if (test_and_clear_bit(H2G_DATA_IN,
 			       &csr->gadget_ep_in_reg[ep_num].intr)) {
-		set_bit(TX_ACTION_H2G_DATA_IN_REQ,
+		set_bit(H2G_DATA_IN,
 			 &gadget_controller->tx_action_reason[ep_num]);
 		set_tx_action = 1;
 	}
+	if (test_and_clear_bit(H2G_CONTROL_DATA_IN,
+			       &csr->gadget_ep_in_reg[ep_num].intr)) {
+		set_bit(H2G_CONTROL_DATA_IN,
+			&gadget_controller->tx_action_reason[ep_num]);
+		set_tx_action  = 1;
+	}
+
 	if (set_tx_action)
 		set_bit(ep_num, &gadget_controller->tx_action);
 	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
@@ -233,6 +247,26 @@ static int kick_hcd(struct vsoc_usb_gadget *gadget_controller, int ep_num,
 	return rc;
 }
 
+/*
+ * TODO(romitd): Implement.
+ */
+static int gadget_handle_control_data(
+		struct vsoc_usb_gadget *gadget_controller, int ep_num, int dir)
+{
+	int rc = 0;
+	return rc;
+}
+
+/*
+ * TODO(romitd): Implement.
+ */
+static int gadget_handle_control_setup(
+		struct vsoc_usb_gadget *gadget_controller, int ep_num)
+{
+	int rc = 0;
+	return rc;
+}
+
 static int kick_gadget_internal(unsigned long data)
 {
 	struct vsoc_usb_gadget *gadget_controller =
@@ -250,23 +284,49 @@ static int kick_gadget_internal(unsigned long data)
 	return 0;
 }
 
+static int gadget_handle_control_transaction(
+		struct vsoc_usb_gadget *gadget_controller, int ep_num,
+		unsigned long reason)
+{
+	int rc = 0;
+
+	if (test_and_clear_bit(H2G_CONTROL_SETUP, &reason))
+		rc = gadget_handle_control_setup(gadget_controller, ep_num);
+	else if (test_and_clear_bit(H2G_CONTROL_DATA_IN, &reason))
+		rc = gadget_handle_control_data(gadget_controller, ep_num, IN);
+	else if (test_and_clear_bit(H2G_CONTROL_DATA_OUT, &reason))
+		rc = gadget_handle_control_data(gadget_controller, ep_num, OUT);
+
+	return rc;
+}
 
 static int vsoc_gadget_handle_ep_tx_events(
 	struct vsoc_usb_gadget *gadget_controller, int ep_num)
 {
-	unsigned long flags;
-	int rc = 0;
+	unsigned long flags, reason = 0;
+	int rc = 0, is_control_event = 0;
 
 	dbg("%s\n", __func__);
 	dbg("   handling ep-%d-IN\n", ep_num);
 
 	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
-	if (test_and_clear_bit(TX_ACTION_H2G_DATA_IN_REQ,
+	if (test_and_clear_bit(H2G_DATA_IN,
 			       &gadget_controller->tx_action_reason[ep_num])) {
-		dbg("%s  TX_ACTION_H2G_DATA_IN_REQ", __func__);
+		dbg("%s  H2G_DATA_IN_REQ\n", __func__);
+		set_bit(H2G_DATA_IN, &reason);
+	}
+
+	if (test_and_clear_bit(H2G_CONTROL_DATA_IN,
+			       &gadget_controller->tx_action_reason[ep_num])) {
+		dbg("%s  H2G_CONTROL_DATA_IN\n", __func__);
+		set_bit(H2G_CONTROL_DATA_IN, &reason);
+		is_control_event = 1;
 	}
 	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 
+	if (is_control_event)
+		rc = gadget_handle_control_transaction(gadget_controller,
+						       ep_num, reason);
 	return rc;
 }
 
@@ -298,12 +358,12 @@ static int _vsoc_gadget_tx(struct vsoc_usb_gadget *gadget_controller)
 	 */
 	status = 0;
 	for (i = 0; i < VSOC_NUM_ENDPOINTS && tx_action; i++) {
-		if (test_and_clear_bit(i, &tx_action))
-			status =
-			vsoc_gadget_handle_ep_tx_events(gadget_controller, i);
-		if (status) {
-			printk(KERN_INFO "%s Error in ep-%d IN\n", __func__, i);
-			status = 0;
+		if (test_and_clear_bit(i, &tx_action)) {
+			status = vsoc_gadget_handle_ep_tx_events(
+							gadget_controller, i);
+			if (status)
+				printk(KERN_INFO "%s Error in ep-%d IN\n",
+				       __func__, i);
 		}
 	}
 
@@ -360,24 +420,37 @@ static int vsoc_gadget_handle_controller_events(
 static int vsoc_gadget_handle_ep_rx_events(
 	struct vsoc_usb_gadget *gadget_controller, int ep_num)
 {
-	unsigned long flags;
-	int rc = 0;
+	unsigned long flags, reason = 0;
+	int rc = 0, is_control_event = 0;
 
 	dbg("%s\n", __func__);
 	dbg("   handling ep-%d-OUT\n", ep_num);
 
 	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
-	if (test_and_clear_bit(RX_ACTION_H2G_DATA_OUT_REQ,
+	if (test_and_clear_bit(H2G_DATA_OUT,
 		&gadget_controller->rx_action_reason[ep_num])) {
-		dbg("%s  RX_ACTION_H2G_DATA_OUT_REQ", __func__);
+		dbg("%s  H2G_DATA_OUT", __func__);
+		set_bit(H2G_DATA_OUT, &reason);
 	}
 
-	if (test_and_clear_bit(RX_ACTION_H2G_CONTROL_SETUP,
+	if (test_and_clear_bit(H2G_CONTROL_SETUP,
 		&gadget_controller->rx_action_reason[ep_num])) {
-		dbg("%s  RX_ACTION_H2G_CONTROL_SETUP", __func__);
+		dbg("%s  H2G_CONTROL_SETUP", __func__);
+		set_bit(H2G_CONTROL_SETUP, &reason);
+		is_control_event = 1;
 	}
+	if (test_and_clear_bit(H2G_CONTROL_DATA_OUT,
+		&gadget_controller->rx_action_reason[ep_num])) {
+		dbg("%s  H2G_CONTROL_DATA_OUT", __func__);
+		set_bit(H2G_CONTROL_DATA_OUT, &reason);
+		is_control_event = 1;
+	}
+
 	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 
+	if (is_control_event)
+		rc = gadget_handle_control_transaction(gadget_controller,
+						       ep_num, reason);
 	return rc;
 }
 
@@ -415,12 +488,12 @@ static int _vsoc_gadget_rx(struct vsoc_usb_gadget *gadget_controller)
 	 */
 	status = 0;
 	for (i = 0; i < VSOC_NUM_ENDPOINTS && rx_action; i++) {
-		if (test_and_clear_bit(i, &rx_action))
-			status =
-			vsoc_gadget_handle_ep_rx_events(gadget_controller, i);
-		if (status) {
-			printk(KERN_INFO "%s Error in ep-%d OUT\n", __func__, i);
-			status = 0;
+		if (test_and_clear_bit(i, &rx_action)) {
+			status = vsoc_gadget_handle_ep_rx_events(
+							gadget_controller, i);
+			if (status)
+				printk(KERN_INFO "%s Error in ep-%d OUT\n",
+				       __func__, i);
 		}
 	}
 
@@ -736,8 +809,7 @@ static int gadget_wakeup(struct usb_gadget *gadget)
 	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 
 	/*
-	 * TODO(romitd):
-	 * We need to kick the HCD.
+	 * TODO(romitd): We need to kick the HCD.
 	 */
 	return rc;
 }
@@ -1022,8 +1094,7 @@ static void vsoc_gadget_controller_pm(struct vsoc_usb_gadget *gadget_controller,
 	gadget_controller->udc_suspended = suspend;
 
 	/*
-	 * TODO(romitd):
-	 * Notify HCD.
+	 * TODO(romitd): Notify HCD.
 	 */
 
 	spin_unlock_irq(&gadget_controller->gadget_lock);
@@ -1036,8 +1107,7 @@ int vsoc_usb_gadget_suspend(struct platform_device *pdev, pm_message_t state)
 	vsoc_gadget_controller_pm(gadget_controller, 1);
 
 	/*
-	 * TODO(romitd):
-	 * Notify the HCD.
+	 * TODO(romitd): Notify the HCD.
 	 */
 
 	return 0;
@@ -1050,8 +1120,7 @@ int vsoc_usb_gadget_resume(struct platform_device *pdev)
 	vsoc_gadget_controller_pm(gadget_controller, 0);
 
 	/*
-	 * TODO(romitd):
-	 * Notify the HCD.
+	 * TODO(romitd): Notify the HCD.
 	 */
 
 	return 0;
