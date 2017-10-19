@@ -70,12 +70,12 @@ typedef uint32_t vsoc_reg_off_t;
  * A process receiving a file descriptor can identify the region being
  * granted using the VSOC_GET_FD_SCOPED_PERMISSION ioctl.
  */
-typedef struct {
+struct fd_scoped_permission {
 	vsoc_reg_off_t begin_offset;
 	vsoc_reg_off_t end_offset;
 	vsoc_reg_off_t owner_offset;
 	uint32_t owned_value;
-} fd_scoped_permission;
+};
 /*
  * This value represents a free area of memory. The driver expects to see this
  * value at owner_offset when creating a permission otherwise it will not do it,
@@ -86,10 +86,10 @@ typedef struct {
 /**
  * Structure to use as argument to the ioctl call to create a fd scoped permission.
  */
-typedef struct {
-	fd_scoped_permission perm;
+struct fd_scoped_permission_arg {
+	struct fd_scoped_permission perm;
 	int32_t managed_region_fd;
-} fd_scoped_permission_arg;
+};
 
 #define VSOC_NODE_FREE ((uint32_t)0)
 
@@ -141,7 +141,7 @@ typedef struct {
  *    On the guest the wait is handled via the VSOC_WAIT_FOR_INCOMING_INTERRUPT
  *    ioctl.
  */
-typedef struct {
+struct vsoc_signal_table_layout {
 	/* log_2(Number of signal table entries) */
 	uint32_t num_nodes_lg2;
 	/*
@@ -155,7 +155,7 @@ typedef struct {
 	 * semi-unique access to an entry in the table
 	 */
 	vsoc_reg_off_t interrupt_signalled_offset;
-} vsoc_signal_table_layout;
+};
 
 typedef char vsoc_device_name[16];
 #define VSOC_REGION_WHOLE ((int32_t)0)
@@ -177,14 +177,14 @@ typedef char vsoc_device_name[16];
  *   3. Start a futex receiver thread on the doorbell fd pointed at the
  *      signal_nodes
  */
-typedef struct {
+struct vsoc_device_region {
 	uint16_t current_version;
 	uint16_t min_compatible_version;
 	vsoc_reg_off_t region_begin_offset;
 	vsoc_reg_off_t region_end_offset;
 	vsoc_reg_off_t offset_of_region_data;
-	vsoc_signal_table_layout guest_to_host_signal_table;
-	vsoc_signal_table_layout host_to_guest_signal_table;
+	struct vsoc_signal_table_layout guest_to_host_signal_table;
+	struct vsoc_signal_table_layout host_to_guest_signal_table;
 	/* Name of the device. Must always be terminated with a '\0', so
 	 * the longest supported device name is 15 characters.
 	 */
@@ -199,7 +199,7 @@ typedef struct {
 	 *     (represented by a fd) opened on this region.
 	 */
 	uint32_t managed_by;
-} vsoc_device_region;
+};
 
 /*
  * The vsoc layout descriptor.
@@ -207,7 +207,7 @@ typedef struct {
  * The regions should be page aligned.
  */
 
-typedef struct {
+struct vsoc_shm_layout_descriptor {
 	uint16_t major_version;
 	uint16_t minor_version;
 
@@ -219,7 +219,7 @@ typedef struct {
 
 	/* The offset to the start of region descriptors */
 	uint32_t vsoc_region_desc_offset;
-} vsoc_shm_layout_descriptor;
+};
 
 /*
  * This specifies the current version that should be stored in
@@ -236,8 +236,8 @@ typedef struct {
 #define CURRENT_VSOC_LAYOUT_MAJOR_VERSION 2
 #define CURRENT_VSOC_LAYOUT_MINOR_VERSION 0
 
-#define VSOC_CREATE_FD_SCOPED_PERMISSION _IOW(0xF5, 0, fd_scoped_permission)
-#define VSOC_GET_FD_SCOPED_PERMISSION _IOR(0xF5, 1, fd_scoped_permission)
+#define VSOC_CREATE_FD_SCOPED_PERMISSION _IOW(0xF5, 0, struct fd_scoped_permission)
+#define VSOC_GET_FD_SCOPED_PERMISSION _IOR(0xF5, 1, struct fd_scoped_permission)
 
 /*
  * This is used to signal the host to scan the guest_to_host_signal_table
@@ -257,7 +257,7 @@ typedef struct {
  * Guest HALs will use this to retrieve the region description after
  * opening their device node.
  */
-#define VSOC_DESCRIBE_REGION _IOR(0xF5, 4, vsoc_device_region)
+#define VSOC_DESCRIBE_REGION _IOR(0xF5, 4, struct vsoc_device_region)
 
 /*
  * Wake any threads that may be waiting for a host interrupt on this region.
