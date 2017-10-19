@@ -93,61 +93,67 @@ typedef struct {
 
 #define VSOC_NODE_FREE ((uint32_t)0)
 
-// Describes a signal table in shared memory. Each non-zero entry in the
-// table indicates that the receiver should signal the futex at the given
-// offset. Offsets are relative to the region, not the shared memory window.
-//
-// interrupt_signalled_offset is used to reliably signal interrupts across the
-// vmm boundary. There are two roles: transmitter and receiver. For example,
-// in the host_to_guest_signal_table the host is the transmitter and the
-// guest is the receiver. The protocol is as follows:
-//
-// 1. The transmitter should convert the offset of the futex to an offset
-//    in the signal table [0, (1 << num_nodes_lg2))
-//    The transmitter can choose any appropriate hashing algorithm, including
-//    hash = futex_offset & ((1 << num_nodes_lg2) - 1)
-//
-// 3. The transmitter should atomically compare and swap futex_offset with 0
-//    at hash. There are 3 possible outcomes
-//      a. The swap fails because the futex_offset is already in the table.
-//         The transmitter should stop.
-//      b. Some other offset is in the table. This is a hash collision. The
-//         transmitter should move to another table slot and try again. One
-//         possible algorith:
-//         hash = (hash + 1) & ((1 << num_nodes_lg2) - 1)
-//      c. The swap worked. Continue below.
-//
-// 3. The transmitter atomically swaps 1 with the value at the
-//    interrupt_signalled_offset. There are two outcomes:
-//      a. The prior value was 1. In this case an interrupt has already been
-//         posted. The transmitter is done.
-//      b. The prior value was 0, indicating that the receiver may be sleeping.
-//         The transmitter will issue an interrupt.
-//
-// 4. On waking the receiver immediately exchanges a 0 with the
-//    interrupt_signalled_offset. If it receives a 0 then this a spurious
-//    interrupt. That may occasionally happen in the current protocol, but
-//    should be rare.
-//
-// 5. The receiver scans the signal table by atomicaly exchanging 0 at each
-//    location. If a non-zero offset is returned from the exchange the
-//    receiver wakes all sleepers at the given offset:
-//      futex((int*)(region_base + old_value), FUTEX_WAKE, MAX_INT);
-//
-// 6. The receiver thread then does a conditional wait, waking immediately
-//    if the value at interrupt_signalled_offset is non-zero. This catches cases
-//    here additional  signals were posted while the table was being scanned.
-//    On the guest the wait is handled via the VSOC_WAIT_FOR_INCOMING_INTERRUPT
-//    ioctl.
+/*
+ * Describes a signal table in shared memory. Each non-zero entry in the
+ * table indicates that the receiver should signal the futex at the given
+ * offset. Offsets are relative to the region, not the shared memory window.
+ *
+ * interrupt_signalled_offset is used to reliably signal interrupts across the
+ * vmm boundary. There are two roles: transmitter and receiver. For example,
+ * in the host_to_guest_signal_table the host is the transmitter and the
+ * guest is the receiver. The protocol is as follows:
+ *
+ * 1. The transmitter should convert the offset of the futex to an offset
+ *    in the signal table [0, (1 << num_nodes_lg2))
+ *    The transmitter can choose any appropriate hashing algorithm, including
+ *    hash = futex_offset & ((1 << num_nodes_lg2) - 1)
+ *
+ * 3. The transmitter should atomically compare and swap futex_offset with 0
+ *    at hash. There are 3 possible outcomes
+ *      a. The swap fails because the futex_offset is already in the table.
+ *         The transmitter should stop.
+ *      b. Some other offset is in the table. This is a hash collision. The
+ *         transmitter should move to another table slot and try again. One
+ *         possible algorith:
+ *         hash = (hash + 1) & ((1 << num_nodes_lg2) - 1)
+ *      c. The swap worked. Continue below.
+ *
+ * 3. The transmitter atomically swaps 1 with the value at the
+ *    interrupt_signalled_offset. There are two outcomes:
+ *      a. The prior value was 1. In this case an interrupt has already been
+ *         posted. The transmitter is done.
+ *      b. The prior value was 0, indicating that the receiver may be sleeping.
+ *         The transmitter will issue an interrupt.
+ *
+ * 4. On waking the receiver immediately exchanges a 0 with the
+ *    interrupt_signalled_offset. If it receives a 0 then this a spurious
+ *    interrupt. That may occasionally happen in the current protocol, but
+ *    should be rare.
+ *
+ * 5. The receiver scans the signal table by atomicaly exchanging 0 at each
+ *    location. If a non-zero offset is returned from the exchange the
+ *    receiver wakes all sleepers at the given offset:
+ *      futex((int*)(region_base + old_value), FUTEX_WAKE, MAX_INT);
+ *
+ * 6. The receiver thread then does a conditional wait, waking immediately
+ *    if the value at interrupt_signalled_offset is non-zero. This catches cases
+ *    here additional  signals were posted while the table was being scanned.
+ *    On the guest the wait is handled via the VSOC_WAIT_FOR_INCOMING_INTERRUPT
+ *    ioctl.
+ */
 typedef struct {
-	// log_2(Number of signal table entries)
+	/* log_2(Number of signal table entries) */
 	uint32_t num_nodes_lg2;
-	// Offset to the first signal table entry relative to the start
-	// of the region
+	/*
+	 * Offset to the first signal table entry relative to the start of the
+	 * region
+	 */
 	vsoc_reg_off_t futex_uaddr_table_offset;
-	// Offset to an atomic_t / atomic uint32_t. A non-zero value indicates
-	// that one or more offsets are currently posted in the table.
-	// semi-unique access to an entry in the table
+	/*
+	 * Offset to an atomic_t / atomic uint32_t. A non-zero value indicates
+	 * that one or more offsets are currently posted in the table.
+	 * semi-unique access to an entry in the table
+	 */
 	vsoc_reg_off_t interrupt_signalled_offset;
 } vsoc_signal_table_layout;
 
@@ -157,17 +163,17 @@ typedef char vsoc_device_name[16];
 /**
  * Each HAL would (usually) talk to a single device region
  * Mulitple entities care about these regions:
- * * The ivshmem_server will populate the regions in shared memory
- * * The guest kernel will read the region, create minor device nodes, and
+ * - The ivshmem_server will populate the regions in shared memory
+ * - The guest kernel will read the region, create minor device nodes, and
  *   allow interested parties to register for FUTEX_WAKE events in the region
- * * HALs will access via the minor device nodes published by the guest kernel
- * * Host side processes will access the region via the ivshmem_server:
+ * - HALs will access via the minor device nodes published by the guest kernel
+ * - Host side processes will access the region via the ivshmem_server:
  *   1. Pass name to ivshmem_server at a UNIX socket
  *   2. ivshmemserver will reply with 2 fds:
- *     * host->guest doorbell fd
- *     * guest->host doorbell fd
- *     * fd for the shared memory region
- *     * region offset
+ *     - host->guest doorbell fd
+ *     - guest->host doorbell fd
+ *     - fd for the shared memory region
+ *     - region offset
  *   3. Start a futex receiver thread on the doorbell fd pointed at the
  *      signal_nodes
  */
@@ -233,29 +239,34 @@ typedef struct {
 #define VSOC_CREATE_FD_SCOPED_PERMISSION _IOW(0xF5, 0, fd_scoped_permission)
 #define VSOC_GET_FD_SCOPED_PERMISSION _IOR(0xF5, 1, fd_scoped_permission)
 
-/* This is used to signal the host to scan the guest_to_host_signal_table
+/*
+ * This is used to signal the host to scan the guest_to_host_signal_table
  * for new futexes to wake. This sends an interrupt if one is not already
  * in flight.
  */
 #define VSOC_MAYBE_SEND_INTERRUPT_TO_HOST _IO(0xF5, 2)
 
-/* When this returns the guest will scan host_to_guest_signal_table to
+/*
+ * When this returns the guest will scan host_to_guest_signal_table to
  * check for new futexes to wake.
  */
 /* TODO(ghartman): Consider moving this to the bottom half */
 #define VSOC_WAIT_FOR_INCOMING_INTERRUPT _IO(0xF5, 3)
 
-/* Guest HALs will use this to retrieve the region description after
+/*
+ * Guest HALs will use this to retrieve the region description after
  * opening their device node.
  */
 #define VSOC_DESCRIBE_REGION _IOR(0xF5, 4, vsoc_device_region)
 
-/* Wake any threads that may be waiting for a host interrupt on this region.
+/*
+ * Wake any threads that may be waiting for a host interrupt on this region.
  * This is mostly used during shutdown.
  */
 #define VSOC_SELF_INTERRUPT _IO(0xF5, 5)
 
-/* This is used to signal the host to scan the guest_to_host_signal_table
+/*
+ * This is used to signal the host to scan the guest_to_host_signal_table
  * for new futexes to wake. This sends an interrupt unconditionally.
  */
 #define VSOC_SEND_INTERRUPT_TO_HOST _IO(0xF5, 6)

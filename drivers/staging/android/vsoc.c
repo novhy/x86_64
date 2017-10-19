@@ -84,29 +84,35 @@ typedef struct {
 } vsoc_region_data_t;
 
 typedef struct vsoc_device {
-	// Kernel virtual address of REGISTER_BAR.
+	/* Kernel virtual address of REGISTER_BAR. */
 	void __iomem * regs;
-	// Physical address of SHARED_MEMORY_BAR.
+	/* Physical address of SHARED_MEMORY_BAR. */
 	phys_addr_t shm_phys_start;
-	// Kernel virtual address of SHARED_MEMORY_BAR.
+	/* Kernel virtual address of SHARED_MEMORY_BAR. */
 	void * kernel_mapped_shm;
-	// Size of the entire shared memory window in bytes.
+	/* Size of the entire shared memory window in bytes. */
 	size_t shm_size;
-	// Pointer to the virtual address of the shared memory layout structure.
-	// This is probably identical to kernel_mapped_shm, but saving this
-	// here saves a lot of annoying casts.
+	/*
+	 * Pointer to the virtual address of the shared memory layout structure.
+	 * This is probably identical to kernel_mapped_shm, but saving this
+	 * here saves a lot of annoying casts.
+	 */
 	vsoc_shm_layout_descriptor * layout;
-	// Points to a table of region descriptors in the kernel's virtual
-	// address space. Calculated from
-	// vsoc_shm_layout_descriptor.vsoc_region_desc_offset
+	/*
+	 * Points to a table of region descriptors in the kernel's virtual
+	 * address space. Calculated from
+	 * vsoc_shm_layout_descriptor.vsoc_region_desc_offset
+	 */
 	vsoc_device_region * regions;
-	// Head of a list of permissions that have been granted.
+	/* Head of a list of permissions that have been granted. */
 	struct list_head permissions;
 	struct pci_dev * dev;
-	// Per-region (and therefore per-interrupt) information.
+	/* Per-region (and therefore per-interrupt) information. */
 	vsoc_region_data_t * regions_data;
-	// Table of msi-x entries. This has to be separated from
-	// vsoc_region_data_t because the kernel deals with them as an array.
+	/*
+	 * Table of msi-x entries. This has to be separated from
+	 * vsoc_region_data_t because the kernel deals with them as an array.
+	 */
 	struct msix_entry * msix_entries;
 	/*
 	 * Flags that indicate what we've initialzied. These are used to do an
@@ -180,12 +186,12 @@ inline int vsoc_validate_filep(struct file * filp)
 	}
 	return 0;
 }
-// Converts from shared memory offset to virtual address
+/* Converts from shared memory offset to virtual address */
 static inline void* shm_off_to_virtual_addr(vsoc_shm_off_t offset)
 {
 	return vsoc_dev.kernel_mapped_shm + offset;
 }
-// Converts from shared memory offset to physical address
+/* Converts from shared memory offset to physical address */
 static inline phys_addr_t shm_off_to_phys_addr(vsoc_shm_off_t offset)
 {
 	return vsoc_dev.shm_phys_start + offset;
@@ -254,13 +260,13 @@ static int do_create_fd_scoped_permission(vsoc_device_region* region_p,
 		return -EFAULT;
 	}
 	managed_filp = fdget(managed_fd).file;
-	// Check that it's a valid fd,
+	/* Check that it's a valid fd, */
 	if (!managed_filp ||
-	    // that it represents a vsoc region
+	    /* that it represents a vsoc region */
 	    vsoc_validate_filep(managed_filp)) {
 		return -EPERM;
 	}
-	// EEXIST if the given fd already has a permission.
+	/* EEXIST if the given fd already has a permission. */
 	if (((vsoc_private_data_t*)managed_filp->private_data)->
 	    fd_scoped_permission_node) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Fd %d already has a permission\n",
@@ -268,74 +274,74 @@ static int do_create_fd_scoped_permission(vsoc_device_region* region_p,
 		return -EEXIST;
 	}
 	managed_region_p = vsoc_region_from_filep(managed_filp);
-	// Check that the provided region is managed by this one
+	/* Check that the provided region is managed by this one */
 	if (&vsoc_dev.regions[managed_region_p->
 			      managed_by] != region_p) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Region not managed \n");
 		return -EPERM;
 	}
-	// The area must be well formed and have non-zero size
+	/* The area must be well formed and have non-zero size */
 	if (np->permission.begin_offset >= np->permission.end_offset) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Malformed permission area\n");
 		return -EINVAL;
 	}
-	// The area must fit in the memory window
+	/* The area must fit in the memory window */
 	if (np->permission.end_offset > vsoc_device_region_size(managed_region_p)) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Permission area too big\n");
 		return -EINVAL;
 	}
-	// The area must be in the region data section
+	/* The area must be in the region data section */
 	if (np->permission.begin_offset < managed_region_p->offset_of_region_data) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Permission area not in data section\n");
 		return -EINVAL;
 	}
-	// The area must be page aligned
+	/* The area must be page aligned */
 	if (!PAGE_ALIGNED(np->permission.begin_offset) || !PAGE_ALIGNED(np->permission.end_offset)) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Area is not page aligned\n");
 		return -EINVAL;
 	}
-	// The owner flag must reside in the owner memory
+	/* The owner flag must reside in the owner memory */
 	if (np->permission.owner_offset + sizeof(np->permission.owner_offset)
 	    > vsoc_device_region_size(region_p)) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Owner offset outside of region\n");
 		return -EINVAL;
 	}
-	// The owner flag must reside in the data section
+	/* The owner flag must reside in the data section */
 	if (np->permission.owner_offset < region_p->offset_of_region_data) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Owner offset is not in data section\n");
 		return -EINVAL;
 	}
-	// Owner offset must be naturally aligned in the window
+	/* Owner offset must be naturally aligned in the window */
 	if (np->permission.owner_offset & (sizeof(np->permission.owner_offset) - 1)) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Owner offset is not aligned\n");
 		return -EINVAL;
 	}
-	// The owner value must change to claim the memory
+	/* The owner value must change to claim the memory */
 	if (np->permission.owned_value == VSOC_REGION_FREE) {
 		printk(KERN_ERR "VSoC: create_fd_scoped_perm: Owned value is same as free marker\n");
 		return -EINVAL;
 	}
 	owner_ptr = (atomic_t*) shm_off_to_virtual_addr(
 	    region_p->region_begin_offset + np->permission.owner_offset);
-	// We've already verified that this is in the shared memory window, so
-	// it should be safe to write to this address.
+	/* We've already verified that this is in the shared memory window, so
+	 * it should be safe to write to this address. */
 	if (atomic_cmpxchg(owner_ptr,
 			   VSOC_REGION_FREE,
 			   np->permission.owned_value) != VSOC_REGION_FREE) {
 		return -EBUSY;
 	}
 	((vsoc_private_data_t*)managed_filp->private_data)->fd_scoped_permission_node = np;
-	// The file offset needs to be adjusted if the calling
-	// process did any read/write operations on the fd
-	// before creating the permission.
+	/* The file offset needs to be adjusted if the calling
+	 * process did any read/write operations on the fd
+	 * before creating the permission. */
 	if (managed_filp->f_pos) {
 		if (managed_filp->f_pos > np->permission.end_offset) {
-			// If the offset is beyond the permission end, set it
-			// to the end.
+			/* If the offset is beyond the permission end, set it
+			 * to the end. */
 			managed_filp->f_pos = np->permission.end_offset;
 		} else {
-			// If the offset is within the permission interval
-			// keep it there otherwise reset it to zero.
+			/* If the offset is within the permission interval
+			 * keep it there otherwise reset it to zero. */
 			if (managed_filp->f_pos < np->permission.begin_offset) {
 				managed_filp->f_pos = 0;
 			} else {
@@ -405,7 +411,7 @@ static long vsoc_ioctl(struct file * filp,
 	{
 		fd_scoped_permission_node_t* node = NULL;
 		node = kzalloc(sizeof(*node), GFP_KERNEL);
-		// We can't allocate memory for the permission
+		/* We can't allocate memory for the permission */
 		if (!node) {
 			return -ENOMEM;
 		}
@@ -526,7 +532,8 @@ static loff_t vsoc_lseek(struct file * filp, loff_t offset, int origin)
 		}
 		break;
 	case SEEK_HOLE:
-		// Next hole is always the end of the region, unless offset is beyond that
+		/* Next hole is always the end of the region, unless offset is
+		 * beyond that */
 		if (offset < area_len) {
 			offset = area_len;
 		}
@@ -719,7 +726,7 @@ static int vsoc_probe_device(struct pci_dev *pdev,
 		vsoc_remove_device(pdev);
 		return -ENOSPC;
 	}
-	// Check that all regions are well formed
+	/* Check that all regions are well formed */
 	for (i = 0; i < vsoc_dev.layout->region_count; ++i) {
 		const vsoc_device_region* region = vsoc_dev.regions + i;
 		if (!PAGE_ALIGNED(region->region_begin_offset) ||
@@ -894,7 +901,7 @@ static int __init vsoc_init_module (void)
 
 static int vsoc_open(struct inode * inode, struct file * filp)
 {
-	// Can't use vsoc_validate_filep because filp is still incomplete
+	/* Can't use vsoc_validate_filep because filp is still incomplete */
 	int ret = vsoc_validate_inode(inode);
 	if (ret) {
 		return ret;
@@ -933,7 +940,7 @@ static int vsoc_release(struct inode * inode, struct file * filp)
 	return 0;
 }
 
-/**
+/*
  * Returns the device relative offset and length of the area specified by the
  * fd scoped permission. If there is no fd scoped permission set, a default
  * permission covering the entire region is assumed, unless the region is owned
@@ -954,11 +961,11 @@ static ssize_t vsoc_get_area(struct file *filp,
 		off += perm->begin_offset;
 		length = perm->end_offset - perm->begin_offset;
 	} else if (region_p->managed_by == VSOC_REGION_WHOLE) {
-		// No permission set and the regions is not owned by another,
-		// default to full region access.
+		/* No permission set and the regions is not owned by another,
+		 * default to full region access. */
 		length = vsoc_device_region_size(region_p);
 	} else {
-		// return zero length, access is denied.
+		/* return zero length, access is denied. */
 		length = 0;
 	}
 	if (area_offset) *area_offset = off;
@@ -976,7 +983,7 @@ static int vsoc_mmap(struct file *filp, struct vm_area_struct * vma)
 
 	area_len = vsoc_get_area(filp, &area_off);
 
-	// Add the requested offset
+	/* Add the requested offset */
 	area_off += (vma->vm_pgoff << PAGE_SHIFT);
 	area_len -= (vma->vm_pgoff << PAGE_SHIFT);
 	if (area_len < len) {
