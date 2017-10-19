@@ -42,22 +42,65 @@ static struct usb_hcd *vsoc_hcd_to_hcd(struct vsoc_hcd *vsoc_hcd)
 	return vsoc_hcd->hcd;
 }
 
-/*
- * TODO(romitd): Implement.
- */
 static int hcd_scrub_ep_buffer(struct vsoc_hcd *vsoc_hcd, int ep_num, int dir)
 {
 	int rc = 0;
+	unsigned long flags;
+	struct vsoc_usb_packet_buffer *buf;
+	struct vsoc_usb_shm *shm = vsoc_hcd->shm;
+
+	BUG_ON(!spin_is_locked(&vsoc_hcd->vsoc_hcd_lock));
+
+	buf = (dir == IN) ? &shm->ep_in_buf[ep_num] : &shm->ep_out_buf[ep_num];
+	spin_lock_irqsave(&shm->shm_lock, flags);
+	buf->hcd_data_len = buf->gadget_data_len = 0;
+	memset(buf->buffer, 0, VSOC_ENDPOINT_BUFFER_SIZE);
+	spin_unlock_irqrestore(&shm->shm_lock, flags);
 	return rc;
 }
 
-/*
- * TODO (romitd): Implement.
- */
 static int try_hcd_scrub_ep_buffer_by_urb(struct vsoc_hcd *vsoc_hcd,
 					  struct urbp *urbp)
 {
 	int rc = 0;
+	u8 ep_num, is_out;
+	struct vsoc_usb_packet_buffer *buf;
+	struct urb *urb;
+	struct vsoc_usb_shm *shm = vsoc_hcd->shm;
+	unsigned long flags;
+
+	BUG_ON(!spin_is_locked(&vsoc_hcd->vsoc_hcd_lock));
+
+	urb = urbp->urb;
+	ep_num = usb_pipeendpoint(urb->pipe);
+	is_out = usb_pipeout(urb->pipe);
+
+	/*
+	 * This URB is not in flight so don't mess with the ep buffers.
+	 */
+	if (!test_and_clear_bit(URB_IN_FLIGHT_BIT, &urbp->transaction_state))
+		return rc;
+	/*
+	 * USB CONTROL transfers differ from BULK/INTERRUPT/ISO. Depending on
+	 * the state of the transfer the packet could be in the input or the
+	 * output packet buffer.
+	 */
+	if (usb_pipecontrol(urb->pipe)) {
+		if (urbp->transaction_state == CONTROL_IN_STATE ||
+		    urbp->transaction_state == CONTROL_IN_START_STATE)
+			buf = &shm->ep_in_buf[ep_num];
+		else
+			buf = &shm->ep_out_buf[ep_num];
+	} else if (is_out) {
+		buf = &shm->ep_out_buf[ep_num];
+	} else {
+		buf = &shm->ep_in_buf[ep_num];
+	}
+
+	spin_lock_irqsave(&shm->shm_lock, flags);
+	buf->hcd_data_len = buf->gadget_data_len = 0;
+	spin_unlock_irqrestore(&shm->shm_lock, flags);
+
 	return rc;
 }
 
@@ -283,13 +326,185 @@ static int kick_gadget(struct vsoc_hcd *vsoc_hcd, int ep_num,
 	return rc;
 }
 
-/*
- * TODO(romitd): Implement.
- */
+static void vsoc_hcd_giveback_urb(struct vsoc_hcd *vsoc_hcd, struct urbp *urbp,
+				  int status)
+{
+	struct urb *urb;
+	BUG_ON(!spin_is_locked(&vsoc_hcd->vsoc_hcd_lock));
+	urb = urbp->urb;
+	list_del(&urbp->urbp_list);
+	kfree(urbp);
+
+	usb_hcd_unlink_urb_from_ep(vsoc_hcd_to_hcd(vsoc_hcd), urb);
+	spin_unlock(&vsoc_hcd->vsoc_hcd_lock);
+	usb_hcd_giveback_urb(vsoc_hcd_to_hcd(vsoc_hcd), urb, status);
+	spin_lock(&vsoc_hcd->vsoc_hcd_lock);
+
+	return;
+}
+
 static int vsoc_hcd_ep_control_transaction(struct vsoc_hcd *vsoc_hcd,
 					   int ep_num, int dir)
 {
-	int rc = 0;
+	struct vsoc_usb_shm *shm;
+	struct vsoc_usb_controller_regs *csr;
+	struct list_head *urbp_list_head;
+	struct urbp *urbp;
+	struct urb *urb;
+	void *ubuf;
+	struct vsoc_usb_packet_buffer *buf;
+	unsigned long hcd_lock_flags, shm_lock_flags;
+	unsigned long gadget_intr = 0, hcd_data_len;
+	int rc = 0, inform_gadget = 0, walk_urbp_list = 0;
+
+	dbg("%s handling ep-%d control transaction\n", __func__, ep_num);
+
+	shm = vsoc_hcd->shm;
+	csr = &shm->csr;
+
+	BUG_ON(dir == NONE);
+
+	spin_lock_irqsave(&vsoc_hcd->vsoc_hcd_lock, hcd_lock_flags);
+	/*
+	 * Control transfers always gets queued on the OUT list.
+	 */
+	urbp_list_head = &vsoc_hcd->urbp_list_out[ep_num];
+
+	/*
+	 * TODO(romitd): Introduce a new function to avoid goto try_next;
+	 */
+try_next:
+	if (list_empty(urbp_list_head)) {
+		if (!walk_urbp_list) {
+			printk(KERN_WARNING "%s Empty list on ep[%d]\n",
+			       __func__, ep_num);
+			rc = -EFAULT;
+		}
+		goto unlock_hcd;
+	}
+
+	urbp = list_first_entry(urbp_list_head, struct urbp, urbp_list);
+	urb = urbp->urb;
+	buf = (dir == OUT) ? &shm->ep_out_buf[ep_num] : &shm->ep_in_buf[ep_num];
+
+	spin_lock_irqsave(&shm->shm_lock, shm_lock_flags);
+	/*
+	 * Handle different states.
+	 * TODO(romitd): Because of the many transaction states, we have many
+	 * if then blocks. This may be refactored.
+	 */
+	if (urbp->transaction_state == CONTROL_SETUP_STATE) {
+		struct usb_ctrlrequest *setup =
+			(struct usb_ctrlrequest *)urb->setup_packet;
+		dbg("%s CONTROL_SETUP_STATE\n", __func__);
+		/* USB HS Setup packet is always 8 bytes */
+		memcpy(buf->buffer, setup, sizeof(struct usb_ctrlrequest));
+		buf->gadget_data_len = 0;
+		buf->hcd_data_len = sizeof(struct usb_ctrlrequest);
+		inform_gadget = 1;
+		gadget_intr = H2G_CONTROL_SETUP;
+		urbp->transaction_state = CONTROL_SETUP_ACK_WAIT_STATE;
+		set_bit(URB_IN_FLIGHT_BIT, &urbp->transaction_state);
+	} else if (urbp->transaction_state == CONTROL_OUT_START_STATE) {
+		inform_gadget = 1;
+		gadget_intr = H2G_CONTROL_DATA_OUT;
+		hcd_data_len = urb->transfer_buffer_length -
+					urb->actual_length;
+		WARN_ON(buf->gadget_data_len != sizeof(struct usb_ctrlrequest));
+		buf->hcd_data_len =
+			min(hcd_data_len,
+				(unsigned long) VSOC_ENDPOINT_BUFFER_SIZE);
+		dbg("%s sending %lu bytes to gadget\n", __func__,
+						       buf->hcd_data_len);
+		ubuf = urb->transfer_buffer + urb->actual_length;
+		memcpy(buf->buffer, ubuf, buf->hcd_data_len);
+		buf->gadget_data_len = 0;
+		urbp->transaction_state = CONTROL_OUT_STATE;
+		set_bit(URB_IN_FLIGHT_BIT, &urbp->transaction_state);
+	} else if (urbp->transaction_state == CONTROL_OUT_STATE) {
+		urb->actual_length += buf->gadget_data_len;
+		dbg("%s gadget copied %lu bytes\n", __func__, buf->gadget_data_len);
+		if (urb->transfer_buffer_length == urb->actual_length) {
+			urbp->transaction_state = TRANSFER_COMPLETE_STATE;
+			buf->hcd_data_len = buf->gadget_data_len = 0;
+		} else {
+			inform_gadget = 1;
+			gadget_intr = H2G_CONTROL_DATA_OUT;
+			hcd_data_len = urb->transfer_buffer_length -
+						urb->actual_length;
+			buf->hcd_data_len =
+				min(hcd_data_len,
+				  (unsigned long) VSOC_ENDPOINT_BUFFER_SIZE);
+			dbg("%s sending %lu bytes to gadget\n", __func__,
+							buf->hcd_data_len);
+			ubuf = urb->transfer_buffer + urb->actual_length;
+			memcpy(buf->buffer, ubuf, buf->hcd_data_len);
+			buf->gadget_data_len = 0;
+			urbp->transaction_state = CONTROL_OUT_STATE;
+			set_bit(URB_IN_FLIGHT_BIT, &urbp->transaction_state);
+		}
+	} else if (urbp->transaction_state == CONTROL_IN_START_STATE) {
+		dbg("%s CONTROL_IN_START_STATE\n", __func__);
+		inform_gadget = 1;
+		gadget_intr = H2G_CONTROL_DATA_IN;
+		buf->gadget_data_len = 0;
+		hcd_data_len = urb->transfer_buffer_length -
+				urb->actual_length;
+		buf->hcd_data_len =
+			min(hcd_data_len,
+			    (unsigned long)VSOC_ENDPOINT_BUFFER_SIZE);
+		dbg("%s expecting %lu bytes from gadget\n",__func__,
+			 buf->hcd_data_len);
+		urbp->transaction_state = CONTROL_IN_STATE;
+	} else if (urbp->transaction_state == CONTROL_IN_STATE) {
+		int is_short_transaction = 0;
+		int max_packet_size;
+		dbg("%s Got %lu bytes from gadget\n", __func__, buf->gadget_data_len);
+		ubuf = urb->transfer_buffer + urb->actual_length;
+		memcpy(ubuf, buf->buffer, buf->gadget_data_len);
+		urb->actual_length += buf->gadget_data_len;
+		max_packet_size = le16_to_cpu(urb->ep->desc.wMaxPacketSize);
+		BUG_ON(!max_packet_size);
+		/*
+		 * Gadget will send data in multiples of wMaxPackeSize for that
+		 * endpoint. If it doesn't its a short packet and signals no
+		 * more data from gadget for this URB request. Proceed to retire
+		 * this URB.
+		 */
+		is_short_transaction = (buf->gadget_data_len % max_packet_size);
+		if ((urb->transfer_buffer_length == urb->actual_length) ||
+		    is_short_transaction) {
+			urbp->transaction_state = TRANSFER_COMPLETE_STATE;
+			buf->hcd_data_len = buf->gadget_data_len = 0;
+		} else {
+			hcd_data_len = urb->transfer_buffer_length -
+					urb->actual_length;
+			buf->hcd_data_len =
+				min(hcd_data_len,
+				    (unsigned long)VSOC_ENDPOINT_BUFFER_SIZE);
+			buf->gadget_data_len = 0;
+			dbg("%s expecting %lu bytes from gadget\n",__func__,
+			    buf->hcd_data_len);
+			inform_gadget = 1;
+			gadget_intr = H2G_CONTROL_DATA_IN;
+		}
+		/*
+		 * TODO(romitd): Handle URB_ZERO_PACKET.
+		 */
+	}
+
+	spin_unlock_irqrestore(&shm->shm_lock, shm_lock_flags);
+	if (urbp->transaction_state == TRANSFER_COMPLETE_STATE) {
+		vsoc_hcd_giveback_urb(vsoc_hcd, urbp, 0);
+		walk_urbp_list = 1;
+		goto try_next;
+	}
+unlock_hcd:
+	spin_unlock_irqrestore(&vsoc_hcd->vsoc_hcd_lock, hcd_lock_flags);
+
+	if (inform_gadget)
+		rc = kick_gadget(vsoc_hcd, ep_num, dir, gadget_intr);
+
 	return rc;
 }
 
@@ -319,7 +534,7 @@ static int vsoc_hcd_handle_control_transaction(struct vsoc_hcd *vsoc_hcd,
 	BUG_ON(ep_num != usb_pipeendpoint(urb->pipe));
 
 	if (test_and_clear_bit(G2H_CONTROL_DATA_NAK, &reason))
-		urbp->transaction_state = EP_NAK_STATE;
+		urbp->nak = 1;
 
 	/*
 	 * SETUP transaction of Control transfer.
@@ -328,10 +543,7 @@ static int vsoc_hcd_handle_control_transaction(struct vsoc_hcd *vsoc_hcd,
 		dbg("%s H2G_CONTROL_SETUP\n", __func__);
 		/* Initiate transfer only if this is the solitary URB */
 		if (list_is_singular(urbp_list_head)) {
-			/*
-			 * TODO (romit): Uncomment when implemented.
-			 * try_hcd_scrub_ep_buffer_by_urb(vsoc_hcd, urbp);
-			 */
+			hcd_scrub_ep_buffer(vsoc_hcd, ep_num, OUT);
 			initiate_transfer = 1;
 			urbp->transaction_state = CONTROL_SETUP_STATE;
 			dir = OUT;
@@ -424,11 +636,9 @@ static int vsoc_hcd_handle_ep_rx_events(struct vsoc_hcd *vsoc_hcd, int ep_num)
 		&vsoc_hcd->rx_action_reason[ep_num])) {
 		dbg("%s G2H_TRANSACTION_ERR\n", __func__);
 		urb->actual_length = 0;
-		/* TODO(romitd): Uncomment when implemented.
-		 * try_hcd_scrub_ep_buffer_by_urb(vsoc_hcd, urbp);
-		 * vsoc_hcd_return_urb(vsoc_hcd, urbp, -EPROTO);
-		 */
-		 rc = -ENXIO;
+		try_hcd_scrub_ep_buffer_by_urb(vsoc_hcd, urbp);
+		vsoc_hcd_giveback_urb(vsoc_hcd, urbp, -EPROTO);
+		rc = -ENXIO;
 		/*
 		 *
 		 * TODO(romitd): Kick off the transfer for the next urb.
@@ -481,11 +691,8 @@ static int vsoc_hcd_handle_ep_tx_events(struct vsoc_hcd *vsoc_hcd, int ep_num)
 		&vsoc_hcd->tx_action_reason[ep_num])) {
 		dbg("%s G2H_TRANSACTION_ERR\n", __func__);
 		urb->actual_length = 0;
-		/*
-		 * TODO(romitd): Uncomment when implemented.
-		 * try_hcd_scrub_ep_buffer_by_urb(vsoc_hcd, urbp);
-		 * vsoc_hcd_return_urb(vsoc_hcd, urbp, -EPROTO);
-		*/
+		try_hcd_scrub_ep_buffer_by_urb(vsoc_hcd, urbp);
+		vsoc_hcd_giveback_urb(vsoc_hcd, urbp, -EPROTO);
 		rc = -ENXIO;
 		/*
 		 * TODO(romitd): Kick off the transfer for the next urb.

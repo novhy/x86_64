@@ -42,6 +42,8 @@ static int __init vsoc_usb_hcd_init(void)
 	int rc = -ENOMEM;
 	int i;
 
+	BUILD_BUG_ON(VSOC_ENDPOINT_BUFFER_SIZE < VSOC_MIN_BUFFER_SIZE);
+
 	if (usb_disabled())
 		return -ENODEV;
 

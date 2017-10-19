@@ -68,7 +68,6 @@ enum vsoc_hcd_ep_transaction_state {
 	DATA_IN_ACK_STATE,
 	DATA_OUT_STATE,
 	DATA_OUT_ACK_STATE,
-	EP_NAK_STATE,
 	TRANSFER_COMPLETE_STATE,
 };
 
@@ -76,6 +75,7 @@ struct urbp {
 	struct urb *urb;
 	struct list_head urbp_list;
 	unsigned long transaction_state;
+	unsigned nak:1; /* Gadget is NAKing the request */
 };
 
 /*

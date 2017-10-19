@@ -74,6 +74,7 @@ static int __init vsoc_usb_gadget_init(void)
 	struct vsoc_usb_gadget *gadget_controller[VSOC_USB_MAX_NUM_CONTROLLER];
 
 	BUILD_BUG_ON((ENDPOINT_COUNT) != (VSOC_NUM_ENDPOINTS));
+	BUILD_BUG_ON(VSOC_ENDPOINT_BUFFER_SIZE < VSOC_MIN_BUFFER_SIZE);
 
 	dbg("%s\n", __func__);
 	if (usb_disabled()) return -ENODEV;

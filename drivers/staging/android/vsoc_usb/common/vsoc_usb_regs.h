@@ -56,8 +56,9 @@
  */
 
 
-#define VSOC_NUM_ENDPOINTS 3
-#define VSOC_ENDPOINT_BUFFER_SIZE (16*(1<<10))
+#define VSOC_NUM_ENDPOINTS		3
+#define VSOC_ENDPOINT_BUFFER_SIZE	(16 * (1 << 10))
+#define VSOC_MIN_BUFFER_SIZE		(1 << 10)
 
 enum intr_bitpos {
 	/*
