@@ -496,6 +496,7 @@ try_next:
 	spin_unlock_irqrestore(&shm->shm_lock, shm_lock_flags);
 	if (urbp->transaction_state == TRANSFER_COMPLETE_STATE) {
 		vsoc_hcd_giveback_urb(vsoc_hcd, urbp, 0);
+		kick_gadget(vsoc_hcd, ep_num, OUT, H2G_CONTROL_STATUS);
 		walk_urbp_list = 1;
 		goto try_next;
 	}

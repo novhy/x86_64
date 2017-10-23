@@ -59,18 +59,121 @@ static struct vsoc_usb_gadget_request
 	return container_of(usb_req, struct vsoc_usb_gadget_request, req);
 }
 
-static int handle_gadget_reset(struct vsoc_usb_gadget *gadget_controller)
+static struct vsoc_usb_gadget_ep
+	*gadget_find_endpoint(struct vsoc_usb_gadget *gadget_controller,
+			      u8 address)
+{
+	int i;
+
+	dbg("%s\n", __func__);
+	if ((address & ~USB_DIR_IN) == 0)
+		return &gadget_controller->gep[0];
+	for (i = 1; i < VSOC_NUM_ENDPOINTS; i++) {
+		struct vsoc_usb_gadget_ep *gep = &gadget_controller->gep[i];
+		if (!gep->desc)
+			continue;
+		if (gep->desc->bEndpointAddress == address)
+			return gep;
+	}
+
+	return NULL;
+}
+
+static void nuke(struct vsoc_usb_gadget *gadget_controller,
+		 struct vsoc_usb_gadget_ep *gep)
+{
+	dbg("%s\n", __func__);
+	BUG_ON(!spin_is_locked(&gadget_controller->gadget_lock));
+
+	while (!list_empty(&gep->queue)) {
+		struct vsoc_usb_gadget_request *req;
+
+		req = list_entry(gep->queue.next,
+				 struct vsoc_usb_gadget_request, queue);
+		list_del_init(&req->queue);
+		req->req.status = -ESHUTDOWN;
+
+		spin_unlock(&gadget_controller->gadget_lock);
+		/*
+		 * This will call the complete function of the usb_request
+		 */
+		usb_gadget_giveback_request(&gep->ep, &req->req);
+		spin_lock(&gadget_controller->gadget_lock);
+	}
+}
+
+static int gadget_scrub_ep_buffer(struct vsoc_usb_gadget *gadget_controller,
+				  int ep_num, int dir)
 {
 	int rc = 0;
+	unsigned long flags;
+	struct vsoc_usb_packet_buffer *buf;
+	struct vsoc_usb_shm *shm = gadget_controller->shm;
+
+	BUG_ON(!spin_is_locked(&gadget_controller->gadget_lock));
+
+	buf = (dir == IN) ? &shm->ep_in_buf[ep_num] : &shm->ep_out_buf[ep_num];
+	spin_lock_irqsave(&shm->shm_lock, flags);
+	buf->hcd_data_len = buf->gadget_data_len = 0;
+	memset(buf->buffer, 0, VSOC_ENDPOINT_BUFFER_SIZE);
+	spin_unlock_irqrestore(&shm->shm_lock, flags);
+	return rc;
+}
+
+static int gadget_clean_request_queue(struct vsoc_usb_gadget *gadget_controller,
+				      int ep_num)
+{
+	struct vsoc_usb_gadget_ep *gep;
+	struct vsoc_usb_gadget_request *gadget_req = NULL, *tmp_req = NULL;
+	int rc = 0;
+
+	BUG_ON(!spin_is_locked(&gadget_controller->gadget_lock));
+	gep = &gadget_controller->gep[ep_num];
+
+	list_for_each_entry_safe(gadget_req, tmp_req, &gep->queue, queue) {
+		list_del_init(&gadget_req->queue);
+		/*
+		 * Control endpoints have both IN and OUT buffers. So scrub
+		 * both.
+		 */
+		if (gep->ep.caps.dir_in)
+			gadget_scrub_ep_buffer(gadget_controller, ep_num, IN);
+		if (gep->ep.caps.dir_out)
+			gadget_scrub_ep_buffer(gadget_controller, ep_num, OUT);
+		gadget_req->req.status = -EOVERFLOW;
+		dbg("%s removing stale req\n", __func__);
+		if (gadget_req->req.complete) {
+			spin_unlock(&gadget_controller->gadget_lock);
+			usb_gadget_giveback_request(&gep->ep, &gadget_req->req);
+			spin_lock(&gadget_controller->gadget_lock);
+		}
+	}
+
+	return rc;
+}
+
+static int handle_gadget_reset(struct vsoc_usb_gadget *gadget_controller)
+{
+	struct vsoc_usb_gadget_ep *gep;
+	int rc = 0, i;
 	unsigned long flags;
 	dbg("%s\n", __func__);
 
 	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
 	if (gadget_controller->pullup) {
-		/*
-		 * TODO (romitd): Bring all individual endpoint states to init.
-		 */
 		dbg("%s got reset with pullup engaged\n", __func__);
+		for (i = 0; i < VSOC_NUM_ENDPOINTS; i++) {
+			gep = &gadget_controller->gep[i];
+			gep->transaction_state =
+				(i == 0) ? CONTROL_SETUP_WAIT_STATE :
+					   INIT_STATE;
+			gadget_clean_request_queue(gadget_controller, i);
+		}
+		gadget_controller->address = 0;
+		spin_unlock(&gadget_controller->gadget_lock);
+		usb_gadget_udc_reset(&gadget_controller->gadget,
+				     gadget_controller->driver);
+		spin_lock(&gadget_controller->gadget_lock);
 	} else {
 		dbg("%s got reset with pullup disengaged\n", __func__);
 		rc = -ENODEV;
@@ -78,7 +181,6 @@ static int handle_gadget_reset(struct vsoc_usb_gadget *gadget_controller)
 	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 	return rc;
 }
-
 
 static int handle_gadget_ep_intr_out(struct vsoc_usb_gadget *gadget_controller,
 			      int ep_num)
@@ -108,6 +210,13 @@ static int handle_gadget_ep_intr_out(struct vsoc_usb_gadget *gadget_controller,
 	if (test_and_clear_bit(H2G_CONTROL_DATA_OUT,
 			       &csr->gadget_ep_out_reg[ep_num].intr)) {
 		set_bit(H2G_CONTROL_DATA_OUT,
+			&gadget_controller->rx_action_reason[ep_num]);
+		set_rx_action = 1;
+	}
+
+	if (test_and_clear_bit(H2G_CONTROL_STATUS,
+			       &csr->gadget_ep_out_reg[ep_num].intr)) {
+		set_bit(H2G_CONTROL_STATUS,
 			&gadget_controller->rx_action_reason[ep_num]);
 		set_rx_action = 1;
 	}
@@ -162,6 +271,7 @@ static int handle_gadget_controller_intr(struct vsoc_usb_gadget *gadget_controll
 	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
 	if (test_and_clear_bit(H2G_RESET, &csr->gadget_reg.intr))
 		set_bit(H2G_RESET, &gadget_controller->controller_action);
+
 	if (test_and_clear_bit(H2G_DISCONNECT, &csr->gadget_reg.intr))
 		set_bit(H2G_DISCONNECT, &gadget_controller->controller_action);
 	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
@@ -247,26 +357,6 @@ static int kick_hcd(struct vsoc_usb_gadget *gadget_controller, int ep_num,
 	return rc;
 }
 
-/*
- * TODO(romitd): Implement.
- */
-static int gadget_handle_control_data(
-		struct vsoc_usb_gadget *gadget_controller, int ep_num, int dir)
-{
-	int rc = 0;
-	return rc;
-}
-
-/*
- * TODO(romitd): Implement.
- */
-static int gadget_handle_control_setup(
-		struct vsoc_usb_gadget *gadget_controller, int ep_num)
-{
-	int rc = 0;
-	return rc;
-}
-
 static int kick_gadget_internal(unsigned long data)
 {
 	struct vsoc_usb_gadget *gadget_controller =
@@ -284,6 +374,429 @@ static int kick_gadget_internal(unsigned long data)
 	return 0;
 }
 
+static void gadget_standard_control_usb_request_completion(
+	struct usb_ep *ep, struct usb_request *req)
+{
+	BUG_ON(!ep || !req);
+	if (req->buf)
+		kfree(req->buf);
+
+	req->buf = NULL;
+	usb_ep_free_request(ep, req);
+}
+
+/*
+ * This should be called without holding the gadget_controller spin lock.
+ * IRQs may be disabled, the memory allocation should be accordingly using
+ * GFP_ATOMIC.
+ */
+static struct usb_request *gadget_standard_control_alloc_usb_request(
+				struct vsoc_usb_gadget *gadget_controller,
+				void *data, int data_len)
+{
+	struct usb_request *req;
+	struct vsoc_usb_gadget_ep *gep;
+
+	gep = gadget_find_endpoint(gadget_controller, 0);
+
+	req = usb_ep_alloc_request(&gep->ep, GFP_ATOMIC);
+	if (!req) {
+		WARN_ON(1);
+		return NULL;
+	}
+	req->complete = gadget_standard_control_usb_request_completion;
+
+	if (!data_len) {
+		req->length = 0;
+		return req;
+	} else {
+		req->length = data_len;
+	}
+
+	BUG_ON(data_len && !data);
+
+	req->buf = kzalloc(data_len, GFP_ATOMIC);
+	if (!req->buf) {
+		WARN_ON(1);
+		usb_ep_free_request(&gep->ep, req);
+		return NULL;
+	}
+	memcpy(req->buf, data, data_len);
+
+	return req;
+}
+
+/*
+ * Handles standard Control endpoint requests. Others are passed onto the upper
+ * class driver.
+ * Return value: (< 0 on error or unsupported request), (0 if a standard USB
+ * request and handled by this function. > 0 if the request will be passed onto
+ * the upper class driver.
+ */
+static int gadget_handle_standard_control_request(
+		struct vsoc_usb_gadget *gadget_controller, int ep_num,
+		struct usb_ctrlrequest *setup)
+{
+	struct vsoc_usb_gadget_ep *gep, *gep2;
+	struct usb_request *req;
+	unsigned w_index, w_value;
+	int rc = 1;
+	BUG_ON(!spin_is_locked(&gadget_controller->gadget_lock));
+	w_index = le16_to_cpu(setup->wIndex);
+	w_value = le16_to_cpu(setup->wValue);
+	switch(setup->bRequest) {
+	case USB_REQ_SET_ADDRESS:
+		dbg("%s USB_REQ_SET_ADDRESS -> %d\n", __func__, w_value);
+		if (setup->bRequestType != Dev_Request)
+			break;
+		gadget_controller->address = w_value;
+		rc = 0;
+		gep = gadget_find_endpoint(gadget_controller, 0);
+		spin_unlock(&gadget_controller->gadget_lock);
+		req = gadget_standard_control_alloc_usb_request(
+			gadget_controller, NULL, 0);
+		if (!req)
+			rc = -ENOMEM;
+		else
+			rc = usb_ep_queue(&gep->ep, req, GFP_KERNEL);
+		spin_lock(&gadget_controller->gadget_lock);
+		break;
+	case USB_REQ_SET_FEATURE:
+		dbg("%s USB_REQ_SET_FEATURE -> %d\n", __func__, w_value);
+		if (setup->bRequestType == Dev_Request) {
+			gadget_controller->devstatus |= (1 << w_value);
+			gep = gadget_find_endpoint(gadget_controller, 0);
+			spin_unlock(&gadget_controller->gadget_lock);
+			req = gadget_standard_control_alloc_usb_request(
+				gadget_controller, NULL, 0);
+			if (!req)
+				rc = -ENOMEM;
+			else
+				rc = usb_ep_queue(&gep->ep, req, GFP_KERNEL);
+			spin_lock(&gadget_controller->gadget_lock);
+
+		} else if (setup->bRequestType == Ep_Request) {
+			gep = gadget_find_endpoint(gadget_controller, w_index);
+			if (!gep || gep->ep.name == ep0name) {
+				rc = -EOPNOTSUPP;
+				break;
+			}
+			gep->halted = 1;
+			rc = 0;
+			gep = gadget_find_endpoint(gadget_controller, 0);
+			spin_unlock(&gadget_controller->gadget_lock);
+			req = gadget_standard_control_alloc_usb_request(
+				gadget_controller, NULL, 0);
+			if (!req)
+				rc = -ENOMEM;
+			else
+				rc = usb_ep_queue(&gep->ep, req, GFP_KERNEL);
+			spin_lock(&gadget_controller->gadget_lock);
+		} else {
+			rc = -EOPNOTSUPP;
+		}
+		break;
+	case USB_REQ_CLEAR_FEATURE:
+		dbg("%s USB_REQ_CLEAR_FEATURE -> %d\n", __func__, w_value);
+		if (setup->bRequestType == Dev_Request) {
+			rc = 0;
+			gadget_controller->devstatus &= ~(1 << w_value);
+			gep = gadget_find_endpoint(gadget_controller, 0);
+			spin_unlock(&gadget_controller->gadget_lock);
+			req = gadget_standard_control_alloc_usb_request(
+				gadget_controller, NULL, 0);
+			if (!req)
+				rc = -ENOMEM;
+			else
+				rc = usb_ep_queue(&gep->ep, req, GFP_KERNEL);
+			spin_lock(&gadget_controller->gadget_lock);
+		} else if (setup->bRequestType == Ep_Request) {
+			gep = gadget_find_endpoint(gadget_controller, w_index);
+			if (!gep || gep->ep.name == ep0name) {
+				rc = -EOPNOTSUPP;
+				break;
+			}
+			if (!gep->wedged)
+				gep->halted = 0;
+			rc = 0;
+			gep = gadget_find_endpoint(gadget_controller, 0);
+			spin_unlock(&gadget_controller->gadget_lock);
+			req = gadget_standard_control_alloc_usb_request(
+				gadget_controller, NULL, 0);
+			if (!req)
+				rc = -ENOMEM;
+			else
+				rc = usb_ep_queue(&gep->ep, req, GFP_KERNEL);
+			spin_lock(&gadget_controller->gadget_lock);
+		} else {
+			rc = -EOPNOTSUPP;
+		}
+		break;
+	case USB_REQ_GET_STATUS:
+		dbg("%s USB_REQ_GET_STATUS\n", __func__);
+		if (setup->bRequestType == Dev_InRequest
+			|| setup->bRequestType == Intf_InRequest
+			|| setup->bRequestType == Ep_InRequest) {
+			char buf[2];
+			if (setup->bRequestType == Ep_InRequest) {
+				gep2 = gadget_find_endpoint(gadget_controller,
+							    w_index);
+				if (!gep2) {
+					rc = -EOPNOTSUPP;
+					break;
+				}
+				buf[0] = gep2->halted;
+			} else if (setup->bRequestType == Dev_InRequest) {
+				buf[0] = (u8)gadget_controller->devstatus;
+			} else {
+				buf[0] = 0;
+			}
+			buf[1] = 0;
+			gep = gadget_find_endpoint(gadget_controller, 0);
+			spin_unlock(&gadget_controller->gadget_lock);
+			req = gadget_standard_control_alloc_usb_request(
+				gadget_controller, buf, sizeof(buf));
+			if (!req)
+				rc = -ENOMEM;
+			else
+				rc = usb_ep_queue(&gep->ep, req, GFP_KERNEL);
+			spin_lock(&gadget_controller->gadget_lock);
+		}
+		break;
+	default:
+		dbg("%s Handled by upper class gadget driver\n", __func__);
+	}
+
+	return rc;
+}
+
+static int gadget_transfer_data(struct vsoc_usb_gadget *gadget_controller,
+				struct vsoc_usb_gadget_ep *gep, int ep_num,
+				int dir, int *inform_hcd)
+{
+	struct vsoc_usb_shm *shm;
+	struct vsoc_usb_controller_regs *csr;
+	struct vsoc_usb_packet_buffer *buf;
+	struct vsoc_usb_gadget_request *req;
+	void *ubuf;
+	unsigned long data_remaining, bytes_copied, total_transferred = 0;
+	unsigned long flags;
+	int rc = 0, consider_retry = 0;
+
+	shm = gadget_controller->shm;
+	csr = &shm->csr;
+
+	buf = (dir == IN) ? &shm->ep_in_buf[ep_num] :
+		&shm->ep_out_buf[ep_num];
+	BUG_ON(!spin_is_locked(&gadget_controller->gadget_lock));
+	BUG_ON(dir != IN && dir != OUT);
+
+	if (list_empty(&gep->queue)) {
+		printk(KERN_WARNING "%s no requests on gadget ep %d", __func__,
+		       ep_num);
+		*inform_hcd = 1;
+		/*
+		 * Mark this as NAKing. Once requests are queued to a NAKing ep,
+		 * interrupt the HCD to start data transactions.
+		 */
+		gep->nak = 1;
+		gep->nak_direction = (dir == IN) ? USB_DIR_IN : USB_DIR_OUT;
+		return G2H_DATA_NAK;
+	}
+start_request:
+	req = list_first_entry(&gep->queue, struct vsoc_usb_gadget_request,
+			       queue);
+
+	data_remaining = req->req.length - req->req.actual;
+
+	spin_lock_irqsave(&shm->shm_lock, flags);
+
+	bytes_copied = min3(buf->hcd_data_len - total_transferred,
+			    data_remaining,
+			    (unsigned long) VSOC_ENDPOINT_BUFFER_SIZE);
+
+
+	dbg("%s transferring %lu bytes %s HCD \n", __func__, bytes_copied,
+				(dir == IN) ? "to" : "from");
+
+	ubuf = req->req.buf + req->req.actual;
+	if (dir == IN)
+		memcpy(buf->buffer, ubuf, bytes_copied);
+	else
+		memcpy(ubuf, buf->buffer, bytes_copied);
+
+	buf->gadget_data_len += bytes_copied;
+	total_transferred += bytes_copied;
+	req->req.actual += bytes_copied;
+
+	if (req->req.actual == req->req.length) {
+		list_del_init(&req->queue);
+		req->req.status = 0;
+		spin_unlock(&gadget_controller->gadget_lock);
+		usb_gadget_giveback_request(&gep->ep, &req->req);
+		spin_lock(&gadget_controller->gadget_lock);
+	}
+
+	/*
+	 * TODO(romitd): This will soon go away.
+	 */
+	set_bit(REQUEST_IN_FLIGHT_BIT, &req->request_state);
+
+	*inform_hcd = 1;
+	consider_retry = buf->hcd_data_len - total_transferred;
+
+	if (!list_empty(&gep->queue) && consider_retry) {
+		dbg("%s restarting next request\n", __func__);
+		goto start_request;
+	}
+	spin_unlock_irqrestore(&shm->shm_lock, flags);
+
+	return rc;
+}
+
+static int gadget_handle_control_data(
+		struct vsoc_usb_gadget *gadget_controller, int ep_num, int dir)
+{
+	struct vsoc_usb_gadget_ep *gep;
+	unsigned long flags, intr = 0;
+	int rc = 0, inform_hcd = 0;
+	dbg("%s\n", __func__);
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	gep = gadget_find_endpoint(gadget_controller, ep_num);
+	if (!gep) {
+		dbg("%s ep-%d not configured\n", __func__, ep_num);
+		rc = -ENXIO;
+		inform_hcd = 1;
+		goto unlock;
+	}
+
+	BUG_ON((dir != IN) && (dir != OUT));
+	BUG_ON((dir == IN) &&
+		(gep->transaction_state != CONTROL_IN_WAIT_STATE));
+	BUG_ON((dir == OUT) &&
+		(gep->transaction_state != CONTROL_OUT_WAIT_STATE));
+
+	rc = gadget_transfer_data(gadget_controller, gep, ep_num, dir,
+				  &inform_hcd);
+
+	/* Control EP error go to the start state */
+	if (rc < 0)
+		gep->transaction_state = CONTROL_SETUP_WAIT_STATE;
+
+unlock:
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+
+	if (inform_hcd) {
+		if (rc == G2H_DATA_NAK) {
+			intr = G2H_CONTROL_DATA_NAK;
+			rc = 0;
+		} else {
+			intr = (dir == IN) ? G2H_CONTROL_DATA_IN :
+					     G2H_CONTROL_DATA_OUT_ACK;
+		}
+
+		kick_hcd(gadget_controller, 0, dir,
+				(rc < 0) ? G2H_TRANSACTION_ERR : intr);
+	}
+	return rc;
+}
+
+static int gadget_handle_control_setup(
+		struct vsoc_usb_gadget *gadget_controller, int ep_num)
+{
+	struct vsoc_usb_shm *shm;
+	struct vsoc_usb_controller_regs *csr;
+	struct vsoc_usb_packet_buffer *buf;
+	struct vsoc_usb_gadget_ep *gep;
+	struct usb_ctrlrequest setup;
+	unsigned long gadget_lock_flags, shm_lock_flags;
+	int rc = 0;
+
+	dbg("%s\n", __func__);
+	BUG_ON(ep_num); /* ep 0 is control endpoint */
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, gadget_lock_flags);
+	gep = gadget_find_endpoint(gadget_controller, ep_num);
+	if (!gep) {
+		dbg("%s ep-%d not configured\n", __func__, ep_num);
+		rc = -ENXIO;
+		goto unlock_gadget;
+	}
+
+	/*
+	 * TODO(romitd): This should be only done in the handler for
+	 * H2G_CONTROL_STATUS.
+	 */
+	gep->transaction_state = CONTROL_SETUP_WAIT_STATE;
+
+	shm = gadget_controller->shm;
+	csr = &shm->csr;
+	buf = &shm->ep_out_buf[ep_num];
+	spin_lock_irqsave(&shm->shm_lock, shm_lock_flags);
+	WARN_ON(buf->hcd_data_len != sizeof(struct usb_ctrlrequest));
+	memcpy(&setup, buf->buffer, sizeof(struct usb_ctrlrequest));
+	buf->gadget_data_len = sizeof(struct usb_ctrlrequest);
+
+	if (setup.bRequestType & USB_DIR_IN) {
+		dbg("%s RequestType IN", __func__);
+	} else {
+		dbg("%s Request Type OUT", __func__);
+	}
+
+	spin_unlock_irqrestore(&shm->shm_lock, shm_lock_flags);
+	rc = gadget_handle_standard_control_request(gadget_controller, 0,
+						    &setup);
+	if (rc >= 0)
+		gep->transaction_state =
+			(setup.bRequestType & USB_DIR_IN) ?
+				CONTROL_IN_WAIT_STATE :
+				CONTROL_OUT_WAIT_STATE;
+
+	if (rc > 0) {
+		spin_unlock(&gadget_controller->gadget_lock);
+		rc = gadget_controller->driver->setup(
+						&gadget_controller->gadget,
+						&setup);
+		spin_lock(&gadget_controller->gadget_lock);
+	}
+
+	/* Control EP error go to the start state */
+	if (rc < 0)
+		gep->transaction_state = CONTROL_SETUP_WAIT_STATE;
+
+unlock_gadget:
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock,
+			       gadget_lock_flags);
+	kick_hcd(gadget_controller, 0, OUT,
+			(rc < 0) ? G2H_TRANSACTION_ERR : G2H_CONTROL_SETUP_ACK);
+
+	return rc;
+}
+
+static int gadget_handle_control_status(
+		struct vsoc_usb_gadget *gadget_controller, int ep_num)
+{
+	struct vsoc_usb_gadget_ep *gep;
+	unsigned long gadget_lock_flags;
+	int rc = 0;
+
+	dbg("%s\n", __func__);
+	BUG_ON(ep_num); /* ep 0 is control endpoint */
+
+	spin_lock_irqsave(&gadget_controller->gadget_lock, gadget_lock_flags);
+	gep = gadget_find_endpoint(gadget_controller, ep_num);
+	if (!gep) {
+		dbg("%s ep-%d not configured\n", __func__, ep_num);
+		rc = -ENXIO;
+		goto unlock_gadget;
+	}
+	gep->transaction_state = CONTROL_SETUP_WAIT_STATE;
+unlock_gadget:
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock,
+			       gadget_lock_flags);
+	return rc;
+}
+
 static int gadget_handle_control_transaction(
 		struct vsoc_usb_gadget *gadget_controller, int ep_num,
 		unsigned long reason)
@@ -296,6 +809,8 @@ static int gadget_handle_control_transaction(
 		rc = gadget_handle_control_data(gadget_controller, ep_num, IN);
 	else if (test_and_clear_bit(H2G_CONTROL_DATA_OUT, &reason))
 		rc = gadget_handle_control_data(gadget_controller, ep_num, OUT);
+	else if (test_and_clear_bit(H2G_CONTROL_STATUS, &reason))
+		rc = gadget_handle_control_status(gadget_controller, ep_num);
 
 	return rc;
 }
@@ -446,6 +961,13 @@ static int vsoc_gadget_handle_ep_rx_events(
 		is_control_event = 1;
 	}
 
+	if (test_and_clear_bit(H2G_CONTROL_STATUS,
+		&gadget_controller->rx_action_reason[ep_num])) {
+		dbg("%s  H2G_CONTROL_STATUS", __func__);
+		set_bit(H2G_CONTROL_STATUS, &reason);
+		is_control_event = 1;
+	}
+
 	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 
 	if (is_control_event)
@@ -526,30 +1048,6 @@ static int vsoc_gadget_rx(void *data)
 		if (_vsoc_gadget_rx(gadget_controller)) break;
 
 	return 0;
-}
-
-/*
- * This routine is called with vsoc_usb_gadget lock held.
- */
-static void nuke(struct vsoc_usb_gadget *gadget_controller,
-		 struct vsoc_usb_gadget_ep *gep)
-{
-	dbg("%s\n", __func__);
-	while (!list_empty(&gep->queue)) {
-		struct vsoc_usb_gadget_request *req;
-
-		req = list_entry(gep->queue.next,
-				 struct vsoc_usb_gadget_request, queue);
-		list_del_init(&req->queue);
-		req->req.status = -ESHUTDOWN;
-
-		spin_unlock(&gadget_controller->gadget_lock);
-		/*
-		 * This will call the complete function of the usb_request
-		 */
-		usb_gadget_giveback_request(&gep->ep, &req->req);
-		spin_lock(&gadget_controller->gadget_lock);
-	}
 }
 
 static int gadget_ep_enable(struct usb_ep *ep,
@@ -636,6 +1134,11 @@ static int gadget_ep_enable(struct usb_ep *ep,
 
 	ep->maxpacket = max;
 	gep->desc = desc;
+	gep->halted = gep->wedged = gep->nak = 0;
+
+	gep->transaction_state =
+		(usb_endpoint_type(desc) == USB_ENDPOINT_XFER_CONTROL) ?
+			CONTROL_SETUP_WAIT_STATE : INIT_STATE;
 
 	dev_dbg(udc_dev(gadget_controller), "enabled %s (ep%d%s-%s) maxpacket "
 		"%d\n", ep->name,
@@ -658,7 +1161,6 @@ static int gadget_ep_enable(struct usb_ep *ep,
 			break;
 		} val;}), max) ;
 
-	gep->halted = gep->wedged = 0;
 	retval = 0;
 done:
 	return retval;
@@ -680,6 +1182,12 @@ static int gadget_ep_disable(struct usb_ep *ep)
 	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
 	gep->desc = NULL;
 	nuke(gadget_controller, gep);
+	gep->nak = 0;
+
+	gep->transaction_state =
+		(usb_endpoint_type(ep->desc) == USB_ENDPOINT_XFER_CONTROL) ?
+			CONTROL_SETUP_WAIT_STATE : INIT_STATE;
+
 	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
 
 	dev_dbg(udc_dev(gadget_controller), "disabled %s\n", ep->name);
@@ -690,7 +1198,7 @@ static struct usb_request *gadget_ep_alloc_request(struct usb_ep *ep,
 						   gfp_t gfp_flags)
 {
 	struct vsoc_usb_gadget_request *req;
-
+	u8 address;
 	dbg("%s\n", __func__);
 	if (!ep)
 		return NULL;
@@ -699,18 +1207,30 @@ static struct usb_request *gadget_ep_alloc_request(struct usb_ep *ep,
 	if (!req)
 		return NULL;
 	INIT_LIST_HEAD(&req->queue);
+	req->request_state = INIT_STATE;
+	address = ep->address;
+	dbg("%s ep-[%d]-%s\n", __func__, (address & ~USB_DIR_IN),
+		(address & ~USB_DIR_IN) == 0 ? "Control" :
+			(address & USB_DIR_IN) ? "IN" : "OUT");
 	return &req->req;
 }
+
 
 static void gadget_ep_free_request(struct usb_ep *ep, struct usb_request *req)
 {
 	struct vsoc_usb_gadget_request *gadget_req;
+	u8 address;
 
-	dbg("%s\n", __func__);
 	if (!ep || !req) {
 		WARN_ON(1);
 		return;
 	}
+	address = ep->address;
+	dbg("%s\n", __func__);
+	dbg("%s ep-[%d]-%s\n", __func__, (address & ~USB_DIR_IN),
+		(address & ~USB_DIR_IN) == 0 ? "Control" :
+		(address & USB_DIR_IN) ? "IN" : "OUT");
+
 	gadget_req = usb_req_to_vsoc_usb_gadget_req(req);
 	WARN_ON(!list_empty(&gadget_req->queue));
 	kfree(gadget_req);
@@ -719,14 +1239,104 @@ static void gadget_ep_free_request(struct usb_ep *ep, struct usb_request *req)
 static int gadget_ep_queue_request(struct usb_ep *ep, struct usb_request *req,
 				   gfp_t gfp_flags)
 {
+	struct vsoc_usb_gadget_request *gadget_req;
+	struct vsoc_usb_gadget_ep *gep;
+	struct vsoc_usb_gadget *gadget_controller;
+	unsigned long flags;
+	int rc = 0, ep_num;
+
 	dbg("%s\n", __func__);
-	return 0;
+	if (!req)
+		return -EINVAL;
+
+	gadget_req = usb_req_to_vsoc_usb_gadget_req(req);
+	if (!list_empty(&gadget_req->queue) || !req->complete)
+		return -EINVAL;
+	gep = usb_ep_to_vsoc_gadget_ep(ep);
+
+	if(!ep || (!gep->desc && ep->name != ep0name))
+		return -EINVAL;
+	gadget_controller = vsoc_gadget_ep_to_vsoc_gadget(gep);
+
+	req->status = -EINPROGRESS;
+	req->actual = 0;
+	dbg("  got a request of length %u\n", req->length);
+	spin_lock_irqsave(&gadget_controller->gadget_lock, flags);
+	list_add_tail(&gadget_req->queue, &gep->queue);
+	/*
+	 * The EP was NAKing. Need to restart transactions to HCD.
+	 */
+	if (gep->nak) {
+		dbg("%s restarting transactions on previously NAKing ep\n",
+		    __func__);
+
+		ep_num = gep->ep.address & ~USB_DIR_IN;
+		set_bit(ep_num, (gep->nak_direction == USB_DIR_IN) ?
+				    &gadget_controller->tx_action :
+				    &gadget_controller->rx_action);
+
+		if (gep->ep.caps.type_control) {
+			BUG_ON(ep_num != 0);
+			set_bit((gep->nak_direction == USB_DIR_IN) ?
+					H2G_CONTROL_DATA_IN :
+					H2G_CONTROL_DATA_OUT,
+				(gep->nak_direction == USB_DIR_IN) ?
+				  &gadget_controller->tx_action_reason[ep_num] :
+				  &gadget_controller->rx_action_reason[ep_num]);
+
+		} else {
+			set_bit((gep->nak_direction == USB_DIR_IN) ?
+					H2G_DATA_IN : H2G_DATA_OUT,
+				(gep->nak_direction == USB_DIR_IN) ?
+				  &gadget_controller->tx_action_reason[ep_num] :
+				  &gadget_controller->rx_action_reason[ep_num]);
+		}
+
+		wake_up_interruptible(
+			(gep->nak_direction == USB_DIR_IN) ?
+				&gadget_controller->txq :
+				&gadget_controller->rxq);
+
+		gep->nak = 0;
+	}
+	spin_unlock_irqrestore(&gadget_controller->gadget_lock, flags);
+	return rc;
 }
 
 static int gadget_ep_dequeue_request(struct usb_ep *ep, struct usb_request *req)
 {
+	struct vsoc_usb_gadget_request *gadget_req = NULL;
+	struct vsoc_usb_gadget *gadget_controller;
+	struct vsoc_usb_gadget_ep *gep;
+	unsigned long flags;
+	int rc = -EINVAL;
 	dbg("%s\n", __func__);
-	return 0;
+	if (!ep || !req)
+		return -EINVAL;
+	gep = usb_ep_to_vsoc_gadget_ep(ep);
+	gadget_controller = vsoc_gadget_ep_to_vsoc_gadget(gep);
+	if (!gadget_controller->driver)
+		return -ESHUTDOWN;
+
+	local_irq_save(flags);
+	spin_lock(&gadget_controller->gadget_lock);
+	list_for_each_entry(gadget_req, &gep->queue, queue) {
+		if (&gadget_req->req == req) {
+			list_del_init(&gadget_req->queue);
+			req->status = -ECONNRESET;
+			rc = 0;
+			break;
+		}
+	}
+	spin_unlock(&gadget_controller->gadget_lock);
+
+	if (rc == 0) {
+		dbg("%s dequeued req %p from %s, len %d buf %p\n", __func__,
+		    gadget_req, ep->name, req->length, req->buf);
+		usb_gadget_giveback_request(ep, req);
+	}
+	local_irq_restore(flags);
+	return rc;
 }
 
 static int set_halt_and_wedge(struct usb_ep *ep, int value, int wedged)

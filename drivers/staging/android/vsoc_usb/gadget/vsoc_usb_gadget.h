@@ -34,7 +34,14 @@
 #include <linux/wait.h>
 
 #define	VSOC_USB_FIFO_SIZE   64
-#define VSOC_USB_MAX_STREAMS 16
+
+#define Dev_Request	(USB_TYPE_STANDARD | USB_RECIP_DEVICE)
+#define Dev_InRequest	(Dev_Request | USB_DIR_IN)
+#define Intf_Request	(USB_TYPE_STANDARD | USB_RECIP_INTERFACE)
+#define Intf_InRequest	(Intf_Request | USB_DIR_IN)
+#define Ep_Request	(USB_TYPE_STANDARD | USB_RECIP_ENDPOINT)
+#define Ep_InRequest	(Ep_Request | USB_DIR_IN)
+
 
 struct vsoc_usb_gadget_ep {
 	struct list_head queue;
@@ -42,25 +49,40 @@ struct vsoc_usb_gadget_ep {
 	struct usb_gadget *gadget;
 	const struct usb_endpoint_descriptor *desc;
 	struct usb_ep ep;
+	unsigned long transaction_state;
 	unsigned halted:1;
 	unsigned wedged:1;
-	unsigned already_seen:1;
-	unsigned setup_state:1;
+	unsigned nak:1;
+	u8 nak_direction;
+};
+
+/*
+ * State of a USB request.
+ */
+enum vsoc_gadget_request_state {
+	INIT_STATE = 0x0,
+	CONTROL_SETUP_WAIT_STATE,
+	CONTROL_IN_WAIT_STATE,
+	CONTROL_IN_ACK_STATE,
+	CONTROL_OUT_WAIT_STATE,
+	CONTROL_STATUS_WAIT_STATE,
+	DATA_IN_WAIT_STATE,
+	DATA_IN_ACK_STATE,
+	DATA_OUT_STATE,
 };
 
 struct vsoc_usb_gadget_request {
 	struct list_head queue;
 	struct usb_request req;
+	unsigned long request_state;
 };
 
-enum gadget_rx_action_reasons {
-	RX_ACTION_H2G_DATA_OUT_REQ = 0x0,
-	RX_ACTION_H2G_CONTROL_SETUP,
-};
+/*
+ * The top bit in the transaction state will be set if the URB is in flight.
+ */
+#define REQUEST_IN_FLIGHT_BIT \
+	(sizeof(((struct vsoc_usb_gadget_request *)(0))->request_state) * 8 - 1)
 
-enum gadget_tx_action_reasons {
-	TX_ACTION_H2G_DATA_IN_REQ = 0x0,
-};
 
 struct vsoc_usb_gadget {
 	spinlock_t gadget_lock;
@@ -75,7 +97,7 @@ struct vsoc_usb_gadget {
 	unsigned long tx_action;
 	unsigned long rx_action_reason[VSOC_NUM_ENDPOINTS];
 	unsigned long tx_action_reason[VSOC_NUM_ENDPOINTS];
-	int address;
+	int address; /* usb device address */
 	struct usb_gadget gadget;
 	struct vsoc_usb_gadget_request fifo_req;
 	u8 fifo_buf[VSOC_USB_FIFO_SIZE];
