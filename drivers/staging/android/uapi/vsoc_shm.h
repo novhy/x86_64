@@ -271,4 +271,4 @@ struct vsoc_shm_layout_descriptor {
  */
 #define VSOC_SEND_INTERRUPT_TO_HOST _IO(0xF5, 6)
 
-#endif /* _UAPI_LINUX_BINDER_H */
+#endif /* _UAPI_LINUX_VSOC_SHM_H */
