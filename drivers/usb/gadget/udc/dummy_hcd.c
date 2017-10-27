@@ -33,6 +33,7 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/timer.h>
+#include <linux/hrtimer.h>
 #include <linux/list.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
@@ -50,6 +51,8 @@
 #define DRIVER_VERSION	"02 May 2005"
 
 #define POWER_BUDGET	500	/* in mA; use 8 for low-power port testing */
+
+#define HRTIMER_PERIOD_NS (1000*1000)
 
 static const char	driver_name[] = "dummy_hcd";
 static const char	driver_desc[] = "USB Host+Gadget Emulator";
@@ -231,6 +234,8 @@ struct dummy_hcd {
 	struct dummy			*dum;
 	enum dummy_rh_state		rh_state;
 	struct timer_list		timer;
+	struct hrtimer			hrtimer;
+	u32				hrtimer_active;
 	u32				port_status;
 	u32				old_status;
 	unsigned long			re_timeout;
@@ -1281,8 +1286,11 @@ static int dummy_urb_enqueue(
 		urb->error_count = 1;		/* mark as a new urb */
 
 	/* kick the scheduler, it'll do the rest */
-	if (!timer_pending(&dum_hcd->timer))
-		mod_timer(&dum_hcd->timer, jiffies + 1);
+	if (!dum_hcd->hrtimer_active) {
+		dum_hcd->hrtimer_active = 1;
+		hrtimer_start(&dum_hcd->hrtimer, ns_to_ktime(HRTIMER_PERIOD_NS),
+			      HRTIMER_MODE_REL);
+	}
 
  done:
 	spin_unlock_irqrestore(&dum_hcd->dum->lock, flags);
@@ -1302,8 +1310,14 @@ static int dummy_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 
 	rc = usb_hcd_check_unlink_urb(hcd, urb, status);
 	if (!rc && dum_hcd->rh_state != DUMMY_RH_RUNNING &&
-			!list_empty(&dum_hcd->urbp_list))
-		mod_timer(&dum_hcd->timer, jiffies);
+			!list_empty(&dum_hcd->urbp_list)) {
+		if (!dum_hcd->hrtimer_active) {
+			dum_hcd->hrtimer_active = 1;
+			hrtimer_start(&dum_hcd->hrtimer,
+				      ns_to_ktime(HRTIMER_PERIOD_NS),
+				      HRTIMER_MODE_REL);
+		}
+	}
 
 	spin_unlock_irqrestore(&dum_hcd->dum->lock, flags);
 	return rc;
@@ -1376,12 +1390,11 @@ static int dummy_perform_transfer(struct urb *urb, struct dummy_request *req,
 }
 
 /* transfer up to a frame's worth; caller must own lock */
-static int transfer(struct dummy_hcd *dum_hcd, struct urb *urb,
-		struct dummy_ep *ep, int limit, int *status)
+static void transfer(struct dummy_hcd *dum_hcd, struct urb *urb,
+		struct dummy_ep *ep, int *status)
 {
 	struct dummy		*dum = dum_hcd->dum;
 	struct dummy_request	*req;
-	int			sent = 0;
 
 top:
 	/* if there's no request queued, the device is NAKing; return */
@@ -1412,10 +1425,6 @@ top:
 		if (unlikely(len == 0))
 			is_short = 1;
 		else {
-			/* not enough bandwidth left? */
-			if (limit < ep->ep.maxpacket && limit < len)
-				break;
-			len = min_t(unsigned, len, limit);
 			if (len == 0)
 				break;
 
@@ -1435,8 +1444,6 @@ top:
 			if ((int)len < 0) {
 				req->req.status = len;
 			} else {
-				limit -= len;
-				sent += len;
 				urb->actual_length += len;
 				req->req.actual += len;
 			}
@@ -1507,7 +1514,7 @@ top:
 		if (rescan)
 			goto top;
 	}
-	return sent;
+	return;
 }
 
 static int periodic_bytes(struct dummy *dum, struct dummy_ep *ep)
@@ -1756,36 +1763,15 @@ static int handle_control_request(struct dummy_hcd *dum_hcd, struct urb *urb,
 /* drive both sides of the transfers; looks like irq handlers to
  * both drivers except the callbacks aren't in_irq().
  */
-static void dummy_timer(unsigned long _dum_hcd)
+static enum hrtimer_restart dummy_timer_highres(struct hrtimer *hrt)
 {
-	struct dummy_hcd	*dum_hcd = (struct dummy_hcd *) _dum_hcd;
+	struct dummy_hcd	*dum_hcd =
+		container_of(hrt, struct dummy_hcd, hrtimer);
 	struct dummy		*dum = dum_hcd->dum;
 	struct urbp		*urbp, *tmp;
 	unsigned long		flags;
-	int			limit, total;
 	int			i;
-
-	/* simplistic model for one frame's bandwidth */
-	switch (dum->gadget.speed) {
-	case USB_SPEED_LOW:
-		total = 8/*bytes*/ * 12/*packets*/;
-		break;
-	case USB_SPEED_FULL:
-		total = 64/*bytes*/ * 19/*packets*/;
-		break;
-	case USB_SPEED_HIGH:
-		total = 512/*bytes*/ * 13/*packets*/ * 8/*uframes*/;
-		break;
-	case USB_SPEED_SUPER:
-		/* Bus speed is 500000 bytes/ms, so use a little less */
-		total = 490000;
-		break;
-	default:
-		dev_err(dummy_dev(dum_hcd), "bogus device speed\n");
-		return;
-	}
-
-	/* FIXME if HZ != 1000 this will probably misbehave ... */
+	enum hrtimer_restart retval = HRTIMER_RESTART;
 
 	/* look at each urb queued by the host side driver */
 	spin_lock_irqsave(&dum->lock, flags);
@@ -1793,8 +1779,9 @@ static void dummy_timer(unsigned long _dum_hcd)
 	if (!dum_hcd->udev) {
 		dev_err(dummy_dev(dum_hcd),
 				"timer fired with no URBs pending?\n");
+		dum_hcd->hrtimer_active = 0;
 		spin_unlock_irqrestore(&dum->lock, flags);
-		return;
+		return HRTIMER_NORESTART;
 	}
 	dum_hcd->next_frame_urbp = NULL;
 
@@ -1823,13 +1810,6 @@ restart:
 		else if (dum_hcd->rh_state != DUMMY_RH_RUNNING)
 			continue;
 		type = usb_pipetype(urb->pipe);
-
-		/* used up this frame's non-periodic bandwidth?
-		 * FIXME there's infinite bandwidth for control and
-		 * periodic transfers ... unrealistic.
-		 */
-		if (total <= 0 && type == PIPE_BULK)
-			continue;
 
 		/* find the gadget's ep for this request (if configured) */
 		address = usb_pipeendpoint (urb->pipe);
@@ -1904,8 +1884,6 @@ restart:
 				--dum->callback_usage;
 
 				if (value >= 0) {
-					/* no delays (max 64KB data stage) */
-					limit = 64*1024;
 					goto treat_control_like_bulk;
 				}
 				/* error, see below */
@@ -1924,29 +1902,16 @@ restart:
 		}
 
 		/* non-control requests */
-		limit = total;
 		switch (usb_pipetype(urb->pipe)) {
 		case PIPE_ISOCHRONOUS:
-			/* FIXME is it urb->interval since the last xfer?
-			 * use urb->iso_frame_desc[i].
-			 * complete whether or not ep has requests queued.
-			 * report random errors, to debug drivers.
-			 */
-			limit = max(limit, periodic_bytes(dum, ep));
 			status = -ENOSYS;
 			break;
 
 		case PIPE_INTERRUPT:
-			/* FIXME is it urb->interval since the last xfer?
-			 * this almost certainly polls too fast.
-			 */
-			limit = max(limit, periodic_bytes(dum, ep));
-			/* FALLTHROUGH */
-
 		default:
 treat_control_like_bulk:
 			ep->last_io = jiffies;
-			total -= transfer(dum_hcd, urb, ep, limit, &status);
+			transfer(dum_hcd, urb, ep, &status);
 			break;
 		}
 
@@ -1971,13 +1936,19 @@ return_urb:
 	if (list_empty(&dum_hcd->urbp_list)) {
 		usb_put_dev(dum_hcd->udev);
 		dum_hcd->udev = NULL;
+		dum_hcd->hrtimer_active = 0;
+		retval = HRTIMER_NORESTART;
 	} else if (dum_hcd->rh_state == DUMMY_RH_RUNNING) {
-		/* want a 1 msec delay here */
-		mod_timer(&dum_hcd->timer, jiffies + msecs_to_jiffies(1));
+		retval = HRTIMER_RESTART;
 	}
 
 	spin_unlock_irqrestore(&dum->lock, flags);
+	if (retval == HRTIMER_RESTART)
+		hrtimer_forward_now(hrt, ns_to_ktime(HRTIMER_PERIOD_NS));
+
+	return retval;
 }
+
 
 /*-------------------------------------------------------------------------*/
 
@@ -2355,8 +2326,13 @@ static int dummy_bus_resume(struct usb_hcd *hcd)
 	} else {
 		dum_hcd->rh_state = DUMMY_RH_RUNNING;
 		set_link_state(dum_hcd);
-		if (!list_empty(&dum_hcd->urbp_list))
-			mod_timer(&dum_hcd->timer, jiffies);
+		if (!list_empty(&dum_hcd->urbp_list) &&
+			!dum_hcd->hrtimer_active) {
+			dum_hcd->hrtimer_active = 1;
+			hrtimer_start(&dum_hcd->hrtimer,
+				      ns_to_ktime(HRTIMER_PERIOD_NS),
+				      HRTIMER_MODE_REL);
+		}
 		hcd->state = HC_STATE_RUNNING;
 	}
 	spin_unlock_irq(&dum_hcd->dum->lock);
@@ -2434,9 +2410,8 @@ static DEVICE_ATTR_RO(urbs);
 
 static int dummy_start_ss(struct dummy_hcd *dum_hcd)
 {
-	init_timer(&dum_hcd->timer);
-	dum_hcd->timer.function = dummy_timer;
-	dum_hcd->timer.data = (unsigned long)dum_hcd;
+	hrtimer_init(&dum_hcd->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	dum_hcd->hrtimer.function = dummy_timer_highres;
 	dum_hcd->rh_state = DUMMY_RH_RUNNING;
 	dum_hcd->stream_en_ep = 0;
 	INIT_LIST_HEAD(&dum_hcd->urbp_list);
@@ -2465,9 +2440,8 @@ static int dummy_start(struct usb_hcd *hcd)
 		return dummy_start_ss(dum_hcd);
 
 	spin_lock_init(&dum_hcd->dum->lock);
-	init_timer(&dum_hcd->timer);
-	dum_hcd->timer.function = dummy_timer;
-	dum_hcd->timer.data = (unsigned long)dum_hcd;
+	hrtimer_init(&dum_hcd->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	dum_hcd->hrtimer.function = dummy_timer_highres;
 	dum_hcd->rh_state = DUMMY_RH_RUNNING;
 
 	INIT_LIST_HEAD(&dum_hcd->urbp_list);
@@ -2505,7 +2479,7 @@ static int dummy_setup(struct usb_hcd *hcd)
 	struct dummy *dum;
 
 	dum = *((void **)dev_get_platdata(hcd->self.controller));
-	hcd->self.sg_tablesize = ~0;
+	hcd->self.sg_tablesize = 0;
 	if (usb_hcd_is_primary_hcd(hcd)) {
 		dum->hs_hcd = hcd_to_dummy_hcd(hcd);
 		dum->hs_hcd->dum = dum;
@@ -2646,6 +2620,7 @@ static int dummy_hcd_probe(struct platform_device *pdev)
 	hs_hcd = usb_create_hcd(&dummy_hcd, &pdev->dev, dev_name(&pdev->dev));
 	if (!hs_hcd)
 		return -ENOMEM;
+	hs_hcd->self.uses_dma = 0;
 	hs_hcd->has_tt = 1;
 
 	retval = usb_add_hcd(hs_hcd, 0, 0);
@@ -2659,7 +2634,7 @@ static int dummy_hcd_probe(struct platform_device *pdev)
 			retval = -ENOMEM;
 			goto dealloc_usb2_hcd;
 		}
-
+		ss_hcd->self.uses_dma = 0;
 		retval = usb_add_hcd(ss_hcd, 0, 0);
 		if (retval)
 			goto put_usb3_hcd;
