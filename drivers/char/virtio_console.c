@@ -1737,6 +1737,8 @@ static void handle_control_message(struct virtio_device *vdev,
 			name_size - 1);
 		port->name[name_size - 1] = 0;
 
+		device_rename(port->dev, port->name);
+
 		/*
 		 * Since we only have one sysfs attribute, 'name',
 		 * create it only if we have a name for the port.
