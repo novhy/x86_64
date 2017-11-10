@@ -1872,6 +1872,22 @@ static int virtnet_probe(struct virtio_device *vdev)
 	netif_set_real_num_tx_queues(dev, vi->curr_queue_pairs);
 	netif_set_real_num_rx_queues(dev, vi->curr_queue_pairs);
 
+	/* BEGIN: Cuttlefish extension: assign names to interfaces. */
+	if (dev->dev_addr[0] == 0x0 && dev->dev_addr[1] == 'C' &&
+	    dev->dev_addr[2] == 'V' && dev->dev_addr[3] == 'D') {
+		switch (dev->dev_addr[5]) {
+		case 1:
+			strcpy(dev->name, "rmnet%d");
+			break;
+		default:
+			strcpy(dev->name, "avd%d");
+			break;
+		}
+	} else {
+		strcpy(dev->name, "eth%d");
+	}
+	/* END: Cuttlefish extension: assign names to interfaces. */
+
 	err = register_netdev(dev);
 	if (err) {
 		pr_debug("virtio_net: registering device failed\n");
